@@ -1,0 +1,31 @@
+# Unreal Engine generated data
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# Generated project and IDE state
+.vs/
+.idea/
+/Plugins/Developer/RiderLink/
+*.sln
+*.slnx
+*.sdf
+*.opensdf
+*.suo
+*.user
+*.userprefs
+*.VC.db
+*.VC.VC.opendb
+
+# Local tooling output
+graphify-out/
+
+# Logs and crash artifacts outside Unreal's Saved directory
+*.log
+crashinfo--*
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
