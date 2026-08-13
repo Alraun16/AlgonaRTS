@@ -8,6 +8,11 @@
 			"Name": "AlgonaRTS",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "AlgonaSimulation",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
 		}
 	],
 	"Plugins": [

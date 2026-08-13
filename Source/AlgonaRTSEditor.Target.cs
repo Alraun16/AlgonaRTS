@@ -16,6 +16,6 @@ public class AlgonaRTSEditorTarget : TargetRules
 
 	private void RegisterModulesCreatedByRider()
 	{
-		ExtraModuleNames.AddRange(new string[] {  });
+		ExtraModuleNames.AddRange(new string[] { "AlgonaSimulation" });
 	}
 }
