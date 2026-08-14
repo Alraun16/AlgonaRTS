@@ -37,7 +37,13 @@ void UAlgonaSimulationSubsystem::Deinitialize()
 
 void UAlgonaSimulationSubsystem::Tick(float DeltaTime)
 {
-	RunSimulationStep(DeltaTime);
+	SimulationAccumulatorSeconds += DeltaTime;
+
+	while (SimulationAccumulatorSeconds >= FixedSimulationStepSeconds)
+	{
+		RunSimulationStep(FixedSimulationStepSeconds);
+		SimulationAccumulatorSeconds -= FixedSimulationStepSeconds;
+	}
 }
 
 TStatId UAlgonaSimulationSubsystem::GetStatId() const
@@ -54,7 +60,7 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(float DeltaTime)
 	{
 		return;
 	}
-
+	
 	// P0.1 intentionally does not simulate soldiers yet.
 	// P0.3 will introduce Mass soldier entities and their state.
 }

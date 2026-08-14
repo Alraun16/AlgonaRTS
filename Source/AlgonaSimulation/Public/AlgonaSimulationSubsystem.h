@@ -29,7 +29,10 @@ public:
 
 private:
 	void RunSimulationStep(float DeltaTime);
+	static constexpr float FixedSimulationStepSeconds = 1.0f / 20.0f;
 
+	float SimulationAccumulatorSeconds = 0.0f;
+	
 	UMassEntitySubsystem* MassEntitySubsystem = nullptr;
 	
 };
