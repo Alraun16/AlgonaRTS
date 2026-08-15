@@ -10,15 +10,20 @@ public class AlgonaSimulation : ModuleRules
             new string[]
             {
                 "Core",
+                "CoreUObject",
+                "Engine",
+                "MassCore",
+                "MassEntity",
+                "MassRepresentation",
+                "MassLOD",
+                "MassSpawner"
             }
         );
 
         PrivateDependencyModuleNames.AddRange(
             new string[]
             {
-                "CoreUObject",
-                "Engine",
-                "MassEntity"
+                "MassActors"
             }
         );
     }

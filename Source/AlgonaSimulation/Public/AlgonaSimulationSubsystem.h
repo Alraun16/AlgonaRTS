@@ -2,10 +2,18 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
+#include "MassArchetypeTypes.h"
+#include "Mass/EntityHandle.h"
+
+#include "AlgonaSquad.h"
 
 #include "AlgonaSimulationSubsystem.generated.h"
 
 class UMassEntitySubsystem;
+
+class UMassRepresentationSubsystem;
+class UMassSpawnerSubsystem;
+class UMassEntityConfigAsset;
 
 /**
  * Central entry point for the Algona gameplay simulation.
@@ -23,6 +31,7 @@ class ALGONASIMULATION_API UAlgonaSimulationSubsystem : public UTickableWorldSub
 
 public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+	virtual void PreDeinitialize() override;
 	virtual void Deinitialize() override;
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
@@ -34,5 +43,23 @@ private:
 	float SimulationAccumulatorSeconds = 0.0f;
 	
 	UMassEntitySubsystem* MassEntitySubsystem = nullptr;
+	UMassRepresentationSubsystem* MassRepresentationSubsystem = nullptr;
 	
+	UMassSpawnerSubsystem* MassSpawnerSubsystem = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMassEntityConfigAsset> SoldierEntityConfig = nullptr;
+	
+	FMassArchetypeHandle SoldierArchetype;
+	
+	void CreateSoldiers();
+	void CreateSquads();
+	
+	static constexpr int32 P0SoldierCount = 20000;
+
+	TArray<FMassEntityHandle> SoldierEntities;
+	TArray<FAlgonaSquad> Squads;
+	
+	float RepresentationDebugElapsed = 0.0f;
+	bool bRepresentationDebugLogged = false;
 };
