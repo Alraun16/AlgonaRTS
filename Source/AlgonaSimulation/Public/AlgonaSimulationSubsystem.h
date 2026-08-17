@@ -1,65 +1,58 @@
 ﻿#pragma once
 
-#include "CoreMinimal.h"
-#include "Subsystems/WorldSubsystem.h"
-#include "MassArchetypeTypes.h"
-#include "Mass/EntityHandle.h"
-
 #include "AlgonaSquad.h"
+
+#include "CoreMinimal.h"
+#include "Mass/EntityHandle.h"
+#include "Subsystems/WorldSubsystem.h"
 
 #include "AlgonaSimulationSubsystem.generated.h"
 
-class UMassEntitySubsystem;
-
-class UMassRepresentationSubsystem;
-class UMassSpawnerSubsystem;
 class UMassEntityConfigAsset;
+class UMassEntitySubsystem;
+class UMassSpawnerSubsystem;
 
-/**
- * Central entry point for the Algona gameplay simulation.
- *
- * P0.1:
- * Tick -> RunSimulationStep -> simulation state / Mass.
- *
- * P0.2 will replace the direct per-frame simulation call
- * with a fixed-step accumulator.
- */
+/*
+ World-scoped coordinator текущего P0-прототипа.
+
+ Отвечает за fixed-step boundary, создание Mass soldiers и стартовую
+ структуру squads. Реальная пакетная Simulation и отдельная Presentation
+ добавляются следующим архитектурным этапом.
+*/
 UCLASS()
-class ALGONASIMULATION_API UAlgonaSimulationSubsystem : public UTickableWorldSubsystem
+class ALGONASIMULATION_API UAlgonaSimulationSubsystem
+	: public UTickableWorldSubsystem
 {
 	GENERATED_BODY()
 
 public:
-	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
-	virtual void PreDeinitialize() override;
+	virtual void Initialize(
+		FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
 
 private:
+	// Пока только фиксирует границу одного simulation step.
 	void RunSimulationStep(float DeltaTime);
-	static constexpr float FixedSimulationStepSeconds = 1.0f / 20.0f;
+
+	// Одноразовый P0 spawn и стартовая раскладка.
+	void CreateSoldiers();
+	void CreateSquads();
+
+	static constexpr float FixedSimulationStepSeconds =
+		1.0f / 20.0f;
+	static constexpr int32 P0SoldierCount = 20000;
 
 	float SimulationAccumulatorSeconds = 0.0f;
-	
+
 	UMassEntitySubsystem* MassEntitySubsystem = nullptr;
-	UMassRepresentationSubsystem* MassRepresentationSubsystem = nullptr;
-	
 	UMassSpawnerSubsystem* MassSpawnerSubsystem = nullptr;
 
 	UPROPERTY(Transient)
-	TObjectPtr<UMassEntityConfigAsset> SoldierEntityConfig = nullptr;
-	
-	FMassArchetypeHandle SoldierArchetype;
-	
-	void CreateSoldiers();
-	void CreateSquads();
-	
-	static constexpr int32 P0SoldierCount = 20000;
+	TObjectPtr<UMassEntityConfigAsset> SoldierEntityConfig =
+		nullptr;
 
 	TArray<FMassEntityHandle> SoldierEntities;
 	TArray<FAlgonaSquad> Squads;
-	
-	float RepresentationDebugElapsed = 0.0f;
-	bool bRepresentationDebugLogged = false;
 };

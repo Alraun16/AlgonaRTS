@@ -2,29 +2,27 @@
 
 public class AlgonaSimulation : ModuleRules
 {
-    public AlgonaSimulation(ReadOnlyTargetRules Target) : base(Target)
-    {
-        PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
+	public AlgonaSimulation(ReadOnlyTargetRules Target) : base(Target)
+	{
+		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-        PublicDependencyModuleNames.AddRange(
-            new string[]
-            {
-                "Core",
-                "CoreUObject",
-                "Engine",
-                "MassCore",
-                "MassEntity",
-                "MassRepresentation",
-                "MassLOD",
-                "MassSpawner"
-            }
-        );
+		// Используются public headers модуля.
+		PublicDependencyModuleNames.AddRange(new[]
+		{
+			"Core",
+			"CoreUObject",
+			"Engine",
+			"MassEntity",
+			"MassSpawner"
+		});
 
-        PrivateDependencyModuleNames.AddRange(
-            new string[]
-            {
-                "MassActors"
-            }
-        );
-    }
+		// Нужны только текущей private implementation.
+		PrivateDependencyModuleNames.AddRange(new[]
+		{
+			"MassCore",
+			"MassRepresentation",
+			"MassLOD",
+			"MassActors"
+		});
+	}
 }

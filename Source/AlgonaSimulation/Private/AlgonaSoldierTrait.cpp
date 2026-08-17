@@ -9,7 +9,9 @@ void UAlgonaSoldierTrait::BuildTemplate(
 	FMassEntityTemplateBuildContext& BuildContext,
 	const UWorld& World
 ) const
-{
+{	
+	(void)World;
+	
 	BuildContext.AddFragment<FTransformFragment>();
 	BuildContext.AddFragment<FAlgonaSquadMemberFragment>();
 	BuildContext.AddFragment<FMassActorFragment>();

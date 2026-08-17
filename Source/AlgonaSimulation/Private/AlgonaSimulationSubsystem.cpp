@@ -23,81 +23,40 @@
 
 #include "Components/InstancedStaticMeshComponent.h"
 
-void UAlgonaSimulationSubsystem::Initialize(FSubsystemCollectionBase& Collection)
+void UAlgonaSimulationSubsystem::Initialize(
+	FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 
 	UWorld* World = GetWorld();
-	MassEntitySubsystem = World
-		? World->GetSubsystem<UMassEntitySubsystem>()
-		: nullptr;
-	
-	MassRepresentationSubsystem =
-	World->GetSubsystem<UMassRepresentationSubsystem>();
-	
+	if (!World)
+	{
+		return;
+	}
+
+	MassEntitySubsystem =
+		World->GetSubsystem<UMassEntitySubsystem>();
 	MassSpawnerSubsystem =
-	World->GetSubsystem<UMassSpawnerSubsystem>();
-	
+		World->GetSubsystem<UMassSpawnerSubsystem>();
+
 	if (MassEntitySubsystem && MassSpawnerSubsystem)
 	{
 		CreateSoldiers();
 		CreateSquads();
 	}
-	
-	/*
-	if (MassEntitySubsystem)
-	{
-		FMassEntityManager& EntityManager =
-			MassEntitySubsystem->GetMutableEntityManager();
-
-		const UScriptStruct* SoldierElements[] =
-		{
-			FTransformFragment::StaticStruct(),
-			FAlgonaSoldierTag::StaticStruct(),
-			FAlgonaSquadMemberFragment::StaticStruct(),
-
-			FMassRepresentationFragment::StaticStruct(),
-			FMassRepresentationLODFragment::StaticStruct(),
-			FMassVisualizationProcessorTag::StaticStruct()
-		};
-
-		SoldierArchetype = EntityManager.CreateArchetype(
-			SoldierElements,
-			FMassArchetypeCreationParams(FName(TEXT("AlgonaSoldier")))
-		);
-		
-		CreateSoldiers();
-		CreateSquads();
-	}
-	*/
-	
-	UE_LOG(
-		LogAlgonaSimulation,
-		Log,
-		TEXT("Initialized. World=%s, MassSubsystem=%s"),
-		*GetNameSafe(World),
-		*GetNameSafe(MassEntitySubsystem)
-	);
-}
-
-void UAlgonaSimulationSubsystem::PreDeinitialize()
-{
-	Super::PreDeinitialize();
 }
 
 void UAlgonaSimulationSubsystem::Deinitialize()
 {
-	UE_LOG(
-		LogAlgonaSimulation,
-		Log,
-		TEXT("Deinitialized.")
-	);
-	
-	SoldierArchetype.Reset();
-	
+	// Локальные handles/config не должны переживать world teardown.
+	SoldierEntities.Reset();
+	Squads.Reset();
+	SoldierEntityConfig = nullptr;
+
+	MassSpawnerSubsystem = nullptr;
 	MassEntitySubsystem = nullptr;
-	MassRepresentationSubsystem = nullptr;
-	
+	SimulationAccumulatorSeconds = 0.0f;
+
 	Super::Deinitialize();
 }
 
@@ -105,84 +64,12 @@ void UAlgonaSimulationSubsystem::Tick(float DeltaTime)
 {
 	SimulationAccumulatorSeconds += DeltaTime;
 
-	while (SimulationAccumulatorSeconds >= FixedSimulationStepSeconds)
+	while (SimulationAccumulatorSeconds
+		>= FixedSimulationStepSeconds)
 	{
 		RunSimulationStep(FixedSimulationStepSeconds);
-		SimulationAccumulatorSeconds -= FixedSimulationStepSeconds;
-	}
-	
-	if (!bRepresentationDebugLogged &&
-	MassEntitySubsystem &&
-	!SoldierEntities.IsEmpty())
-	{
-		RepresentationDebugElapsed += DeltaTime;
-
-		if (RepresentationDebugElapsed >= 1.0f)
-		{
-			FMassEntityManager& EntityManager =
-				MassEntitySubsystem->GetMutableEntityManager();
-
-			const FMassEntityHandle Soldier = SoldierEntities[0];
-
-			if (EntityManager.IsEntityValid(Soldier))
-			{
-				FMassEntityView EntityView(EntityManager, Soldier);
-				
-
-				
-				const FMassRepresentationFragment* Representation =
-					EntityView.GetFragmentDataPtr<FMassRepresentationFragment>();
-
-				const FMassRepresentationLODFragment* RepresentationLOD =
-					EntityView.GetFragmentDataPtr<FMassRepresentationLODFragment>();
-
-				if (Representation && RepresentationLOD)
-				{
-					const bool bValidMeshHandle =
-						Representation->StaticMeshDescHandle.IsValid();
-
-					const bool bHasISMData =
-						MassRepresentationSubsystem &&
-						bValidMeshHandle &&
-						MassRepresentationSubsystem
-							->GetISMCSharedDataForDescriptionIndex(
-								Representation->StaticMeshDescHandle.ToIndex()
-							) != nullptr;
-
-					UE_LOG(
-						LogAlgonaSimulation,
-						Warning,
-						TEXT(
-							"Representation debug: "
-							"Type=%d, "
-							"MeshHandleValid=%d, "
-							"MeshHandle=%d, "
-							"ISMData=%d, "
-							"LOD=%d, "
-							"Significance=%.2f, "
-							"Visibility=%d"
-						),
-						static_cast<int32>(
-							Representation->CurrentRepresentation
-						),
-						bValidMeshHandle ? 1 : 0,
-						bValidMeshHandle
-							? Representation->StaticMeshDescHandle.ToIndex()
-							: -1,
-						bHasISMData ? 1 : 0,
-						static_cast<int32>(
-							RepresentationLOD->LOD.GetValue()
-						),
-						RepresentationLOD->LODSignificance,
-						static_cast<int32>(
-							RepresentationLOD->Visibility
-						)
-					);
-				}
-			}
-
-			bRepresentationDebugLogged = true;
-		}
+		SimulationAccumulatorSeconds -=
+			FixedSimulationStepSeconds;
 	}
 }
 
@@ -201,8 +88,8 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(float DeltaTime)
 		return;
 	}
 	
-	// P0.1 intentionally does not simulate soldiers yet.
-	// P0.3 will introduce Mass soldier entities and their state.
+	// Реальная пакетная обработка 20 000 entities добавляется следующим
+	// отдельным P0-этапом. Здесь пока сохраняется fixed-step boundary.
 }
 
 void UAlgonaSimulationSubsystem::CreateSoldiers()
@@ -221,12 +108,6 @@ void UAlgonaSimulationSubsystem::CreateSoldiers()
 
 	if (!SoldierMesh)
 	{
-		UE_LOG(
-			LogAlgonaSimulation,
-			Error,
-			TEXT("Failed to load Archer mesh.")
-		);
-
 		return;
 	}
 
@@ -237,9 +118,8 @@ void UAlgonaSimulationSubsystem::CreateSoldiers()
 		);
 
 	UAlgonaSoldierTrait* SoldierTrait =
-	NewObject<UAlgonaSoldierTrait>(
-		SoldierEntityConfig
-	);
+		NewObject<UAlgonaSoldierTrait>(
+			SoldierEntityConfig);
 
 	UMassStationaryVisualizationTrait* VisualizationTrait =
 		NewObject<UMassStationaryVisualizationTrait>(
@@ -253,12 +133,6 @@ void UAlgonaSimulationSubsystem::CreateSoldiers()
 
 	if (!SoldierTrait || !VisualizationTrait || !LODCollectorTrait)
 	{
-		UE_LOG(
-			LogAlgonaSimulation,
-			Error,
-			TEXT("Failed to create soldier Mass traits.")
-		);
-
 		return;
 	}
 
@@ -336,14 +210,6 @@ void UAlgonaSimulationSubsystem::CreateSoldiers()
 	SoldierConfig.AddTrait(*VisualizationTrait);
 	SoldierConfig.AddTrait(*LODCollectorTrait);
 	
-	UE_LOG(
-		LogAlgonaSimulation,
-		Log,
-		TEXT("Soldier visualization: Meshes=%d, Mesh=%s"),
-		VisualizationTrait->StaticMeshInstanceDesc.Meshes.Num(),
-		*GetNameSafe(SoldierMesh)
-	);
-	
 	const FMassEntityTemplate& SoldierTemplate =
 		SoldierEntityConfig->GetOrCreateEntityTemplate(*World);
 
@@ -354,13 +220,6 @@ void UAlgonaSimulationSubsystem::CreateSoldiers()
 		SoldierTemplate,
 		P0SoldierCount,
 		SoldierEntities
-	);
-
-	UE_LOG(
-		LogAlgonaSimulation,
-		Log,
-		TEXT("Created %d Mass soldiers."),
-		SoldierEntities.Num()
 	);
 }
 
@@ -420,7 +279,7 @@ void UAlgonaSimulationSubsystem::CreateSquads()
 			FMassEntityView EntityView(EntityManager, SoldierEntity);
 
 			FTransformFragment& TransformFragment =
-	EntityView.GetFragmentData<FTransformFragment>();
+				EntityView.GetFragmentData<FTransformFragment>();
 
 			const int32 FormationX =
 				MemberIndex % Squad.FormationWidth;
@@ -449,12 +308,4 @@ void UAlgonaSimulationSubsystem::CreateSquads()
 
 		Squads.Add(MoveTemp(Squad));
 	}
-
-	UE_LOG(
-		LogAlgonaSimulation,
-		Log,
-		TEXT("Created %d squads from %d soldiers."),
-		Squads.Num(),
-		SoldierEntities.Num()
-	);
 }
