@@ -5,6 +5,10 @@
 
 #include "AlgonaSoldierTrait.generated.h"
 
+/**
+ * Добавляет к Mass-солдату нужные игровые данные.
+ * FMassActorFragment пока оставлен только для старой визуализации.
+ */
 UCLASS()
 class ALGONASIMULATION_API UAlgonaSoldierTrait : public UMassEntityTraitBase
 {
@@ -13,6 +17,5 @@ class ALGONASIMULATION_API UAlgonaSoldierTrait : public UMassEntityTraitBase
 public:
 	virtual void BuildTemplate(
 		FMassEntityTemplateBuildContext& BuildContext,
-		const UWorld& World
-	) const override;
+		const UWorld& World) const override;
 };

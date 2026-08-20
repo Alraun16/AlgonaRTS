@@ -6,20 +6,23 @@ public class AlgonaSimulation : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		// Используются public headers модуля.
+		/*
+		 * AlgonaSoldierFragments.h — public header и напрямую использует
+		 * Mass/EntityElementTypes.h, поэтому MassCore тоже public dependency.
+		 */
 		PublicDependencyModuleNames.AddRange(new[]
 		{
 			"Core",
 			"CoreUObject",
 			"Engine",
+			"MassCore",
 			"MassEntity",
 			"MassSpawner"
 		});
 
-		// Нужны только текущей private implementation.
+		// Нужны только пока существует старый Mass Presentation.
 		PrivateDependencyModuleNames.AddRange(new[]
 		{
-			"MassCore",
 			"MassRepresentation",
 			"MassLOD",
 			"MassActors"

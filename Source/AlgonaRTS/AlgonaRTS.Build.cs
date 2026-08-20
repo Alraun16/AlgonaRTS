@@ -11,8 +11,7 @@ public class AlgonaRTS : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
-			"InputCore",
-			"EnhancedInput"
+			"AlgonaSimulation"
 		});
 	}
 }
