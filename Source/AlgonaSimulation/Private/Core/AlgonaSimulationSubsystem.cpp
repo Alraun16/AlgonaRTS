@@ -1,6 +1,6 @@
-﻿#include "AlgonaSimulationSubsystem.h"
+﻿#include "Core/AlgonaSimulationSubsystem.h"
 
-#include "AlgonaSoldierFragments.h"
+#include "Army/AlgonaSoldierFragments.h"
 
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
@@ -264,6 +264,48 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshots(
 	return OutSnapshots.Num();
 }
 
+bool UAlgonaSimulationSubsystem::SubmitMoveSquadCommand(
+	int32 SquadId,
+	const FVector& TargetLocation)
+{
+	if (!IsAuthoritativeSimulationWorld()
+		|| !Squads.IsValidIndex(SquadId)
+		|| Squads[SquadId].SquadId != SquadId)
+	{
+		return false;
+	}
+
+	FAlgonaSquadMoveCommand& Command =
+		PendingMoveCommands.AddDefaulted_GetRef();
+	Command.SquadId = SquadId;
+	Command.TargetLocation = TargetLocation;
+
+	return true;
+}
+
+int32 UAlgonaSimulationSubsystem::SubmitMoveAllSquadsByOffset(
+	const FVector& Offset)
+{
+	if (!IsAuthoritativeSimulationWorld())
+	{
+		return 0;
+	}
+
+	int32 SubmittedCommands = 0;
+
+	for (const FAlgonaSquad& Squad : Squads)
+	{
+		if (SubmitMoveSquadCommand(
+			Squad.SquadId,
+			Squad.AnchorLocation + Offset))
+		{
+			++SubmittedCommands;
+		}
+	}
+
+	return SubmittedCommands;
+}
+
 void UAlgonaSimulationSubsystem::InitializeQueries()
 {
 	FMassEntityManager& EntityManager =
@@ -273,7 +315,13 @@ void UAlgonaSimulationSubsystem::InitializeQueries()
 	SoldierUpdateQuery =
 		MakeUnique<FMassEntityQuery>(
 			EntityManager.AsShared());
-
+	
+	SoldierUpdateQuery->AddRequirement<FTransformFragment>(
+		EMassFragmentAccess::ReadWrite);
+	
+	SoldierUpdateQuery->AddRequirement<FAlgonaSquadMemberFragment>(
+		EMassFragmentAccess::ReadOnly);
+	
 	SoldierUpdateQuery
 		->AddRequirement<FAlgonaSoldierMovementFragment>(
 			EMassFragmentAccess::ReadWrite);

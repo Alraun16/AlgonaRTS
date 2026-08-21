@@ -1,6 +1,6 @@
 ﻿#pragma once
 
-#include "AlgonaSoldierSnapshot.h"
+#include "Army/AlgonaSoldierSnapshot.h"
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"

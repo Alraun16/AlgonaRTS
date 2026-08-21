@@ -1,6 +1,6 @@
-﻿#include "AlgonaSoldierTrait.h"
+﻿#include "Army/AlgonaSoldierTrait.h"
 
-#include "AlgonaSoldierFragments.h"
+#include "Army/AlgonaSoldierFragments.h"
 #include "Mass/EntityFragments.h"
 #include "MassActorSubsystem.h"
 #include "MassEntityTemplateRegistry.h"

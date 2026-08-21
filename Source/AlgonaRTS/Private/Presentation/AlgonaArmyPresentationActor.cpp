@@ -1,6 +1,6 @@
-﻿#include "AlgonaArmyPresentationActor.h"
+﻿#include "Presentation/AlgonaArmyPresentationActor.h"
 
-#include "AlgonaSimulationSubsystem.h"
+#include "Core/AlgonaSimulationSubsystem.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"

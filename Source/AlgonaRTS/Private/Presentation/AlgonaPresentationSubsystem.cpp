@@ -1,6 +1,6 @@
-﻿#include "AlgonaPresentationSubsystem.h"
+﻿#include "Presentation/AlgonaPresentationSubsystem.h"
 
-#include "AlgonaArmyPresentationActor.h"
+#include "Presentation/AlgonaArmyPresentationActor.h"
 #include "AlgonaP0PresentationExperiment.h"
 #include "Engine/World.h"
 

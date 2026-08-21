@@ -1,7 +1,7 @@
-﻿#include "AlgonaFixedStepAccumulator.h"
-#include "AlgonaSoldierFragments.h"
-#include "AlgonaSoldierSnapshot.h"
-#include "AlgonaSquad.h"
+﻿#include "Core/AlgonaFixedStepAccumulator.h"
+#include "Army/AlgonaSoldierFragments.h"
+#include "Army/AlgonaSoldierSnapshot.h"
+#include "Army/AlgonaSquad.h"
 
 #include "Mass/EntityElementTypes.h"
 #include "Misc/AutomationTest.h"
@@ -45,6 +45,16 @@ bool FAlgonaP0SimulationTypesTest::RunTest(const FString& Parameters)
 		DefaultMovement.State,
 		EAlgonaSoldierMovementState::Idle);
 
+	TestFalse(
+	TEXT("Default squad has no active move target"),
+	DefaultSquad.bHasMoveTarget);
+	TestTrue(
+		TEXT("Default squad anchor speed is positive"),
+		DefaultSquad.AnchorMoveSpeed > 0.0f);
+	TestTrue(
+		TEXT("Default soldier follow speed is positive"),
+		DefaultSquad.SoldierMoveSpeed > 0.0f);
+	
 	const FAlgonaSoldierSnapshot DefaultSnapshot;
 	TestEqual(
 		TEXT("Default snapshot has no session ID"),

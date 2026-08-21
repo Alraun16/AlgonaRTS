@@ -2,8 +2,8 @@
 
 #include "AlgonaFixedStepAccumulator.h"
 #include "AlgonaSimulationStatus.h"
-#include "AlgonaSoldierSnapshot.h"
-#include "AlgonaSquad.h"
+#include "Army/AlgonaSoldierSnapshot.h"
+#include "Army/AlgonaSquad.h"
 
 #include "CoreMinimal.h"
 #include "Mass/EntityHandle.h"
@@ -23,6 +23,13 @@ namespace AlgonaSimulationDefaults
 	inline constexpr int32 SoldierCount = 20000;
 	inline constexpr int32 SquadSize = 50;
 }
+
+/** Приказ, который будет применён в начале следующего fixed-step. */
+struct FAlgonaSquadMoveCommand
+{
+	int32 SquadId = INDEX_NONE;
+	FVector TargetLocation = FVector::ZeroVector;
+};
 
 /**
  * Главная Simulation-система текущего мира.
@@ -78,6 +85,14 @@ public:
 	int32 ExportSoldierSnapshots(
 		TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
 		int32 MaxEntities);
+	
+	// Приказ "простейшее движение"
+	bool SubmitMoveSquadCommand(
+	int32 SquadId,
+	const FVector& TargetLocation);
+
+	int32 SubmitMoveAllSquadsByOffset(
+		const FVector& Offset);
 
 private:
 	void InitializeQueries();
@@ -91,8 +106,11 @@ private:
 	void DestroySoldiers();
 
 	void RunSimulationStep(float DeltaTime);
-
-	int32 UpdateSoldiersForP0();
+	void ProcessPendingMoveCommands();
+	bool UpdateSquadAnchors(float DeltaTime);
+	int32 UpdateSoldiers(
+		float DeltaTime,
+		int32& OutVisitedEntities);
 
 	FVector ComputeSlotWorldPosition(
 		const FAlgonaSquad& Squad,
@@ -123,4 +141,5 @@ private:
 
 	TArray<FMassEntityHandle> SoldierEntities;
 	TArray<FAlgonaSquad> Squads;
+	TArray<FAlgonaSquadMoveCommand> PendingMoveCommands;
 };

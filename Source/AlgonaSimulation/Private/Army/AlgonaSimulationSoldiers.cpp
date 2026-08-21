@@ -1,8 +1,8 @@
-﻿#include "AlgonaSimulationSubsystem.h"
+﻿#include "Core/AlgonaSimulationSubsystem.h"
 
 #include "AlgonaP0PresentationExperiment.h"
-#include "AlgonaSoldierFragments.h"
-#include "AlgonaSoldierTrait.h"
+#include "Army/AlgonaSoldierFragments.h"
+#include "Army/AlgonaSoldierTrait.h"
 
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
@@ -236,6 +236,8 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 			static_cast<double>(SquadY) * SquadSpacingY
 				+ FormationWorldWidth * 0.5,
 			0.0);
+		
+		Squad.TargetAnchorLocation = Squad.AnchorLocation;
 
 		for (int32 SlotIndex = 0;
 			SlotIndex < Squad.MemberCount;
@@ -311,6 +313,7 @@ void UAlgonaSimulationSubsystem::DestroySoldiers()
 
 	SoldierEntities.Reset();
 	Squads.Reset();
+	PendingMoveCommands.Reset();
 	SoldierEntityConfig = nullptr;
 
 	Metrics.EntityCount = 0;

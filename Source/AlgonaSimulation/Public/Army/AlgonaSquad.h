@@ -23,5 +23,10 @@ struct ALGONASIMULATION_API FAlgonaSquad
 
 	// Опорная точка передней части строя.
 	FVector AnchorLocation = FVector::ZeroVector;
+	FVector TargetAnchorLocation = FVector::ZeroVector;
 	FVector FacingDirection = FVector::ForwardVector;
+
+	float AnchorMoveSpeed = 300.0f;
+	float SoldierMoveSpeed = 450.0f;
+	bool bHasMoveTarget = false;
 };
