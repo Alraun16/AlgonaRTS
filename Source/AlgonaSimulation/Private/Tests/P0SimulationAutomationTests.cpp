@@ -74,7 +74,7 @@ bool FAlgonaP0FixedStepAccumulatorTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
 
-	FAlgonaFixedStepAccumulator Accumulator(0.05, 5);
+	FAlgonaFixedStepAccumulator Accumulator(0.025, 5);
 
 	int32 CallbackCount = 0;
 	double SimulatedSeconds = 0.0;
@@ -99,7 +99,7 @@ bool FAlgonaP0FixedStepAccumulatorTest::RunTest(const FString& Parameters)
 			0.001,
 			1.0e-6));
 
-	FAlgonaFixedStepAccumulator HitchAccumulator(0.05, 5);
+	FAlgonaFixedStepAccumulator HitchAccumulator(0.025, 5);
 
 	int32 TotalHitchSteps = HitchAccumulator.Advance(
 		1.0,

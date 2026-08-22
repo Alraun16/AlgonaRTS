@@ -11,7 +11,7 @@
 struct ALGONASIMULATION_API FAlgonaFixedStepAccumulator
 {
 	FAlgonaFixedStepAccumulator(
-		double InFixedStepSeconds = 1.0 / 20.0,
+		double InFixedStepSeconds = 1.0 / 40.0,
 		int32 InMaxStepsPerFrame = 5)
 	{
 		Configure(InFixedStepSeconds, InMaxStepsPerFrame);
@@ -83,7 +83,15 @@ int32 Advance(
 }
 
 	double GetFixedStepSeconds() const { return FixedStepSeconds; }
+	
 	double GetBacklogSeconds() const { return AccumulatorSeconds; }
+	double GetInterpolationAlpha() const
+	{
+		return FMath::Clamp(
+			AccumulatorSeconds / FixedStepSeconds,
+			0.0,
+			1.0);
+	}
 	double GetMaxObservedBacklogSeconds() const
 	{
 		return MaxObservedBacklogSeconds;

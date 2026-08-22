@@ -13,5 +13,10 @@ public class AlgonaRTS : ModuleRules
 			"Engine",
 			"AlgonaSimulation"
 		});
+
+		PrivateDependencyModuleNames.AddRange(new[]
+		{
+			"InputCore"
+		});
 	}
 }

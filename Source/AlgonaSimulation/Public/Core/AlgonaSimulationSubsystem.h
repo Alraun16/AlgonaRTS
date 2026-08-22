@@ -18,7 +18,7 @@ class UMassSpawnerSubsystem;
 
 namespace AlgonaSimulationDefaults
 {
-	inline constexpr double FixedStepSeconds = 1.0 / 20.0;
+	inline constexpr double FixedStepSeconds = 1.0 / 40.0;
 	inline constexpr int32 MaxStepsPerFrame = 5;
 	inline constexpr int32 SoldierCount = 20000;
 	inline constexpr int32 SquadSize = 50;
@@ -64,7 +64,12 @@ public:
 	{
 		return FixedStepAccumulator.GetFixedStepSeconds();
 	}
-
+	
+	double GetInterpolationAlpha() const
+	{
+		return FixedStepAccumulator.GetInterpolationAlpha();
+	}
+	
 	int32 GetSoldierCount() const
 	{
 		return SoldierEntities.Num();
