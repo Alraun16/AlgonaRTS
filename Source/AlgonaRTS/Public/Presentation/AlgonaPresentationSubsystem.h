@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
@@ -7,10 +7,10 @@
 
 class AActor;
 class AAlgonaArmyPresentationActor;
+class AAlgonaArmySkinnedPresentationActor;
 
 /**
- * Создаёт локальную визуализацию армии только там,
- * где она действительно нужна.
+ * Creates local army presentation only in worlds that need rendering.
  */
 UCLASS()
 class ALGONARTS_API UAlgonaPresentationSubsystem final
@@ -30,6 +30,10 @@ public:
 private:
 	UPROPERTY(Transient)
 	TObjectPtr<AAlgonaArmyPresentationActor> PresentationActor =
+		nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<AAlgonaArmySkinnedPresentationActor> SkinnedPresentationActor =
 		nullptr;
 
 	UPROPERTY(Transient)
