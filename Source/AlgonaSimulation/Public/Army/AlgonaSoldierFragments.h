@@ -1,11 +1,11 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 #include "Mass/EntityElementTypes.h"
 
 #include "AlgonaSoldierFragments.generated.h"
 
-/** Игровое состояние движения солдата. */
+/** Gameplay movement state of one authoritative soldier entity. */
 UENUM()
 enum class EAlgonaSoldierMovementState : uint8
 {
@@ -13,17 +13,14 @@ enum class EAlgonaSoldierMovementState : uint8
 	Moving
 };
 
-/** Маркер массовой боевой entity. */
+/** Marks an entity as an Algona combat soldier. */
 USTRUCT()
 struct ALGONASIMULATION_API FAlgonaSoldierTag : public FMassTag
 {
 	GENERATED_BODY()
 };
 
-/**
- * Стабильный ID внутри одной simulation session.
- * Это пока не финальный network ID для P3.
- */
+/** Stable ID within one simulation session. Not the final P3 network ID. */
 USTRUCT()
 struct ALGONASIMULATION_API FAlgonaSoldierIdFragment : public FMassFragment
 {
@@ -32,7 +29,7 @@ struct ALGONASIMULATION_API FAlgonaSoldierIdFragment : public FMassFragment
 	uint32 Value = 0;
 };
 
-/** Хранит принадлежность солдата к отряду и его постоянное место в формации. */
+/** Squad membership and stable formation slot. */
 USTRUCT()
 struct ALGONASIMULATION_API FAlgonaSquadMemberFragment : public FMassFragment
 {
@@ -43,8 +40,8 @@ struct ALGONASIMULATION_API FAlgonaSquadMemberFragment : public FMassFragment
 };
 
 /**
- * Игровое состояние движения солдата.
- * Стоящий и движущийся солдат остаются одной и той же Mass entity.
+ * Authoritative movement state.
+ * Idle and moving soldiers remain the same Mass entity and archetype.
  */
 USTRUCT()
 struct ALGONASIMULATION_API FAlgonaSoldierMovementFragment : public FMassFragment
@@ -52,9 +49,6 @@ struct ALGONASIMULATION_API FAlgonaSoldierMovementFragment : public FMassFragmen
 	GENERATED_BODY()
 
 	FVector Velocity = FVector::ZeroVector;
-
 	uint64 LastProcessedSimulationTick = 0;
-
-	EAlgonaSoldierMovementState State =
-		EAlgonaSoldierMovementState::Idle;
+	EAlgonaSoldierMovementState State = EAlgonaSoldierMovementState::Idle;
 };

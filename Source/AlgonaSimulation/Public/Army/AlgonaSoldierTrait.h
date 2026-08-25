@@ -1,14 +1,11 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 #include "MassEntityTraitBase.h"
 
 #include "AlgonaSoldierTrait.generated.h"
 
-/**
- * Добавляет к Mass-солдату нужные игровые данные.
- * FMassActorFragment пока оставлен только для старой визуализации.
- */
+/** Adds only authoritative simulation data required by one soldier entity. */
 UCLASS()
 class ALGONASIMULATION_API UAlgonaSoldierTrait : public UMassEntityTraitBase
 {

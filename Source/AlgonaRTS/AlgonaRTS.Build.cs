@@ -19,9 +19,9 @@ public class AlgonaRTS : ModuleRules
 			"InputCore"
 		});
 
-		// Backend 3 builds a transient test material graph in Editor PIE so the
-		// interpolation can execute in the vertex shader without requiring a
-		// hand-authored .uasset just for this experiment.
+		// P1 currently injects the proven GPU interpolation WPO into transient
+		// materials in Editor builds. A cooked production material path can
+		// replace this bridge later without changing Simulation or visibility.
 		if (Target.bBuildEditor)
 		{
 			PrivateDependencyModuleNames.Add("MaterialEditor");

@@ -1,4 +1,4 @@
-﻿#include "Core/AlgonaSimulationSubsystem.h"
+#include "Core/AlgonaSimulationSubsystem.h"
 
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
@@ -25,22 +25,18 @@ namespace
 		UAlgonaSimulationSubsystem* Simulation =
 			World->GetSubsystem<UAlgonaSimulationSubsystem>();
 
-		if (!Simulation)
+		if (Simulation)
 		{
-			return;
+			Simulation->SubmitMoveAllSquadsByOffset(FVector(X, Y, Z));
 		}
-
-		Simulation->SubmitMoveAllSquadsByOffset(
-			FVector(X, Y, Z));
 	}
 
-	FAutoConsoleCommandWithWorldAndArgs
-		GAlgonaP1MoveAllByOffsetCommand(
-			TEXT("algona.P1.MoveAllBy"),
-			TEXT("Move all authoritative squads by offset: X Y [Z]."),
-			FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
-				&MoveAllSquadsByOffsetCommand),
-			ECVF_Cheat);
+	FAutoConsoleCommandWithWorldAndArgs GAlgonaP1MoveAllByOffsetCommand(
+		TEXT("algona.P1.MoveAllBy"),
+		TEXT("Move all authoritative squads by offset: X Y [Z]."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
+			&MoveAllSquadsByOffsetCommand),
+		ECVF_Cheat);
 }
 
 #endif

@@ -5,38 +5,31 @@
 
 #include "AlgonaPresentationSubsystem.generated.h"
 
-class AActor;
 class AAlgonaArmyPresentationActor;
-class AAlgonaArmySkinnedPresentationActor;
+class AAlgonaLegacyIsmPresentationActor;
+class AAlgonaRTSCameraActor;
 
 /**
- * Creates local army presentation only in worlds that need rendering.
+ * Owns the local client-side camera and army rendering path.
+ * Dedicated servers never create this subsystem.
  */
 UCLASS()
-class ALGONARTS_API UAlgonaPresentationSubsystem final
-	: public UWorldSubsystem
+class ALGONARTS_API UAlgonaPresentationSubsystem final : public UWorldSubsystem
 {
 	GENERATED_BODY()
 
 public:
-	virtual bool ShouldCreateSubsystem(
-		UObject* Outer) const override;
-
-	virtual void OnWorldBeginPlay(
-		UWorld& InWorld) override;
-
+	virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
+	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
 	virtual void Deinitialize() override;
 
 private:
 	UPROPERTY(Transient)
-	TObjectPtr<AAlgonaArmyPresentationActor> PresentationActor =
-		nullptr;
+	TObjectPtr<AAlgonaArmyPresentationActor> ArmyPresentationActor = nullptr;
 
 	UPROPERTY(Transient)
-	TObjectPtr<AAlgonaArmySkinnedPresentationActor> SkinnedPresentationActor =
-		nullptr;
+	TObjectPtr<AAlgonaLegacyIsmPresentationActor> LegacyPresentationActor = nullptr;
 
 	UPROPERTY(Transient)
-	TObjectPtr<AActor> TestCameraActor =
-		nullptr;
+	TObjectPtr<AAlgonaRTSCameraActor> CameraActor = nullptr;
 };

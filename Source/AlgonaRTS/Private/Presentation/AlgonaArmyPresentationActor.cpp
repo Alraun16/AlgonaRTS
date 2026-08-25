@@ -1,36 +1,399 @@
-﻿#include "Presentation/AlgonaArmyPresentationActor.h"
+#include "Presentation/AlgonaArmyPresentationActor.h"
 
+#include "AlgonaPresentationView.h"
+#include "Presentation/AlgonaPresentationSettings.h"
 #include "Core/AlgonaSimulationSubsystem.h"
 
+#include "Animation/AnimBank.h"
+#include "Animation/AnimSequenceTransformProviderData.h"
 #include "Camera/CameraComponent.h"
-#include "Components/InstancedStaticMeshComponent.h"
-#include "GameFramework/PlayerController.h"
-#include "Engine/StaticMesh.h"
+#include "Components/InstancedSkinnedMeshComponent.h"
+#include "Components/SceneComponent.h"
 #include "Engine/Engine.h"
+#include "Engine/SkinnedAsset.h"
+#include "Engine/SkinnedAssetCommon.h"
 #include "Engine/World.h"
-#include "HAL/IConsoleManager.h"
+#include "Materials/MaterialInterface.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
-#include "UObject/ConstructorHelpers.h"
+#include "UObject/Class.h"
 
-#include "GameFramework/PlayerController.h"
-#include "Kismet/GameplayStatics.h"
+#if WITH_EDITOR
+#include "MaterialEditingLibrary.h"
+#include "MaterialExpressionIO.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialExpressionConstant3Vector.h"
+#include "Materials/MaterialExpressionCustom.h"
+#include "Materials/MaterialExpressionPerInstanceCustomData.h"
+#include "Materials/MaterialExpressionScalarParameter.h"
+#include "Materials/MaterialExpressionWorldPosition.h"
+#include "Materials/MaterialInstanceConstant.h"
+#endif
+
+DEFINE_LOG_CATEGORY_STATIC(LogAlgonaPresentation, Log, All);
 
 namespace
 {
-	/*
-	 * 1 = Presentation обновляет только camera-visible working set.
-	 * 0 = старое поведение: Presentation обновляет все snapshots.
-	 *
-	 * Нужен только для прямого A/B-теста.
-	 */
-	TAutoConsoleVariable<int32>
-		CVarAlgonaP1PresentationCameraCull(
-			TEXT("algona.P1.PresentationCameraCull"),
-			1,
-			TEXT(
-				"1 = camera-visible ISM working set, "
-				"0 = all exported soldiers."),
-			ECVF_Default);
+	constexpr TCHAR AnimBankPath[] =
+		TEXT("/Game/NewFolder/NewAnimBank.NewAnimBank");
+
+	constexpr int32 AnimationIndex = 0;
+
+	// Per-instance GPU interpolation data layout.
+	constexpr int32 PrevPositionIndex = 0;
+	constexpr int32 PrevRotationIndex = 3;
+	constexpr int32 PrevScaleIndex = 7;
+	constexpr int32 CurrentPositionIndex = 10;
+	constexpr int32 CurrentRotationIndex = 13;
+	constexpr int32 CurrentScaleIndex = 17;
+	constexpr int32 TierIndex = 20;
+	constexpr int32 GpuInstanceCustomDataFloatCount = 21;
+
+	// Component-level alpha values. FAR bypasses sub-step interpolation.
+	constexpr int32 NearAlphaPrimitiveDataIndex = 0;
+	constexpr int32 MediumAlphaPrimitiveDataIndex = 1;
+
+	// Current debug soldier height. When final representation types are added,
+	// this becomes a per-type value derived from their actual visual bounds.
+	constexpr double ReferenceUnitHeightCm = 170.0;
+
+	constexpr double NearMinProjectedHeightPixels = 16.0;
+	constexpr double FarMaxProjectedHeightPixels = 10.0;
+	constexpr double MediumMaxVisualStepPixels = 1.0;
+	constexpr double TierHysteresis = 0.05;
+	constexpr double TeleportDistance = 2000.0;
+	constexpr double CullingGuardPixels = 128.0;
+
+#if WITH_EDITOR
+	template <typename TExpression>
+	TExpression* CreateTransientMaterialExpression(
+		UMaterial* Material,
+		int32 NodeX,
+		int32 NodeY)
+	{
+		return Cast<TExpression>(
+			UMaterialEditingLibrary::CreateMaterialExpressionEx(
+				Material,
+				nullptr,
+				TExpression::StaticClass(),
+				nullptr,
+				NodeX,
+				NodeY,
+				false));
+	}
+
+	bool AddCustomInput(
+		UMaterialExpressionCustom& Custom,
+		const TCHAR* Name,
+		UMaterialExpression* Expression)
+	{
+		if (!Expression)
+		{
+			return false;
+		}
+
+		FCustomInput& Input = Custom.Inputs.AddDefaulted_GetRef();
+		Input.InputName = Name;
+		Input.Input.Connect(0, Expression);
+		return true;
+	}
+
+	bool AddCustomInput(
+		UMaterialExpressionCustom& Custom,
+		const TCHAR* Name,
+		const FExpressionInput& ExpressionInput)
+	{
+		if (!ExpressionInput.Expression)
+		{
+			return false;
+		}
+
+		FCustomInput& Input = Custom.Inputs.AddDefaulted_GetRef();
+		Input.InputName = Name;
+		Input.Input = ExpressionInput;
+		return true;
+	}
+
+	bool InjectGpuInterpolationIntoMaterial(
+		UMaterial& RuntimeMaterial,
+		FString& OutError)
+	{
+		UMaterialEditorOnlyData* EditorData = RuntimeMaterial.GetEditorOnlyData();
+		if (!EditorData)
+		{
+			OutError = TEXT("material has no editor-only graph data");
+			return false;
+		}
+
+		if (RuntimeMaterial.bUseMaterialAttributes)
+		{
+			OutError =
+				TEXT("material uses Material Attributes; current WPO bridge does not support that graph yet");
+			return false;
+		}
+
+		FExpressionInput OriginalWpoInput =
+			static_cast<const FExpressionInput&>(EditorData->WorldPositionOffset);
+
+		if (!OriginalWpoInput.Expression)
+		{
+			UMaterialExpressionConstant3Vector* ZeroWpo =
+				CreateTransientMaterialExpression<UMaterialExpressionConstant3Vector>(
+					&RuntimeMaterial,
+					-900,
+					900);
+
+			if (!ZeroWpo)
+			{
+				OutError = TEXT("cannot create zero WPO expression");
+				return false;
+			}
+
+			const FVector3f ConstantWpo =
+				EditorData->WorldPositionOffset.UseConstant
+					? EditorData->WorldPositionOffset.Constant
+					: FVector3f::ZeroVector;
+
+			ZeroWpo->Constant = FLinearColor(
+				ConstantWpo.X,
+				ConstantWpo.Y,
+				ConstantWpo.Z,
+				1.0f);
+
+			OriginalWpoInput.Connect(0, ZeroWpo);
+		}
+
+		UMaterialExpressionWorldPosition* WorldPosition =
+			CreateTransientMaterialExpression<UMaterialExpressionWorldPosition>(
+				&RuntimeMaterial,
+				-900,
+				-500);
+
+		if (!WorldPosition)
+		{
+			OutError = TEXT("cannot create WorldPosition expression");
+			return false;
+		}
+
+		WorldPosition->WorldPositionShaderOffset = WPT_ExcludeAllShaderOffsets;
+
+		static const TCHAR* InstanceInputNames[GpuInstanceCustomDataFloatCount] =
+		{
+			TEXT("PrevPX"), TEXT("PrevPY"), TEXT("PrevPZ"),
+			TEXT("PrevQX"), TEXT("PrevQY"), TEXT("PrevQZ"), TEXT("PrevQW"),
+			TEXT("PrevSX"), TEXT("PrevSY"), TEXT("PrevSZ"),
+			TEXT("CurrPX"), TEXT("CurrPY"), TEXT("CurrPZ"),
+			TEXT("CurrQX"), TEXT("CurrQY"), TEXT("CurrQZ"), TEXT("CurrQW"),
+			TEXT("CurrSX"), TEXT("CurrSY"), TEXT("CurrSZ"),
+			TEXT("InterpTier")
+		};
+
+		TArray<UMaterialExpressionPerInstanceCustomData*> InstanceDataExpressions;
+		InstanceDataExpressions.Reserve(GpuInstanceCustomDataFloatCount);
+
+		for (int32 DataIndex = 0; DataIndex < GpuInstanceCustomDataFloatCount; ++DataIndex)
+		{
+			UMaterialExpressionPerInstanceCustomData* Expression =
+				CreateTransientMaterialExpression<UMaterialExpressionPerInstanceCustomData>(
+					&RuntimeMaterial,
+					-900,
+					-400 + DataIndex * 40);
+
+			if (!Expression)
+			{
+				OutError = TEXT("cannot create PerInstanceCustomData expression");
+				return false;
+			}
+
+			Expression->DataIndex = static_cast<uint32>(DataIndex);
+			Expression->ConstDefaultValue = 0.0f;
+			InstanceDataExpressions.Add(Expression);
+		}
+
+		struct FAlphaExpressionDesc
+		{
+			const TCHAR* Name;
+			int32 PrimitiveDataIndex;
+		};
+
+		static const FAlphaExpressionDesc AlphaDescs[] =
+		{
+			{TEXT("AlphaNear"), NearAlphaPrimitiveDataIndex},
+			{TEXT("AlphaMedium"), MediumAlphaPrimitiveDataIndex}
+		};
+
+		TArray<UMaterialExpressionScalarParameter*> AlphaExpressions;
+		AlphaExpressions.Reserve(UE_ARRAY_COUNT(AlphaDescs));
+
+		for (int32 Index = 0; Index < UE_ARRAY_COUNT(AlphaDescs); ++Index)
+		{
+			UMaterialExpressionScalarParameter* Expression =
+				CreateTransientMaterialExpression<UMaterialExpressionScalarParameter>(
+					&RuntimeMaterial,
+					-500,
+					-400 + Index * 80);
+
+			if (!Expression)
+			{
+				OutError = TEXT("cannot create CustomPrimitiveData alpha expression");
+				return false;
+			}
+
+			Expression->ParameterName = FName(AlphaDescs[Index].Name);
+			Expression->DefaultValue = 1.0f;
+			Expression->bUseCustomPrimitiveData = true;
+			Expression->PrimitiveDataIndex =
+				static_cast<uint8>(AlphaDescs[Index].PrimitiveDataIndex);
+			AlphaExpressions.Add(Expression);
+		}
+
+		UMaterialExpressionCustom* Custom =
+			CreateTransientMaterialExpression<UMaterialExpressionCustom>(
+				&RuntimeMaterial,
+				100,
+				0);
+
+		if (!Custom)
+		{
+			OutError = TEXT("cannot create custom interpolation expression");
+			return false;
+		}
+
+		Custom->Description = TEXT("Algona GPU buffered interpolation");
+		Custom->OutputType = CMOT_Float3;
+		Custom->Code = TEXT(R"ALGONA(
+// FAR uses the latest authoritative instance transform directly.
+[branch]
+if (InterpTier >= 1.5)
+{
+    return OriginalWPO;
+}
+
+float Alpha = (InterpTier < 0.5) ? AlphaNear : AlphaMedium;
+Alpha = saturate(Alpha);
+
+float3 PrevPos = float3(PrevPX, PrevPY, PrevPZ);
+float4 PrevQ = normalize(float4(PrevQX, PrevQY, PrevQZ, PrevQW));
+float3 PrevScale = float3(PrevSX, PrevSY, PrevSZ);
+float3 CurrPos = float3(CurrPX, CurrPY, CurrPZ);
+float4 CurrQ = normalize(float4(CurrQX, CurrQY, CurrQZ, CurrQW));
+float3 CurrScale = float3(CurrSX, CurrSY, CurrSZ);
+
+float4 TargetQ = CurrQ;
+float CosTheta = dot(PrevQ, TargetQ);
+if (CosTheta < 0.0)
+{
+    TargetQ = -TargetQ;
+    CosTheta = -CosTheta;
+}
+CosTheta = clamp(CosTheta, -1.0, 1.0);
+
+float4 InterpQ;
+
+// NEAR uses true shortest-path Slerp. MEDIUM uses normalized Lerp.
+if (InterpTier >= 0.5 || CosTheta > 0.9995)
+{
+    InterpQ = normalize(lerp(PrevQ, TargetQ, Alpha));
+}
+else
+{
+    float Theta = acos(CosTheta);
+    float SinTheta = max(sin(Theta), 0.00001);
+    float A = sin((1.0 - Alpha) * Theta) / SinTheta;
+    float B = sin(Alpha * Theta) / SinTheta;
+    InterpQ = normalize(PrevQ * A + TargetQ * B);
+}
+
+float3 InterpPos = lerp(PrevPos, CurrPos, Alpha);
+float3 InterpScale = lerp(PrevScale, CurrScale, Alpha);
+
+// WorldPos is already skinned under the CURRENT rigid instance transform.
+// Undo only that rigid transform, then apply the interpolated rigid transform.
+float3 FromCurrentOrigin = WorldPos - CurrPos;
+float4 InvCurrQ = float4(-CurrQ.xyz, CurrQ.w);
+float3 CurrentLocalRotated =
+    FromCurrentOrigin
+    + 2.0 * cross(
+        InvCurrQ.xyz,
+        cross(InvCurrQ.xyz, FromCurrentOrigin)
+        + InvCurrQ.w * FromCurrentOrigin);
+
+float3 SafeCurrScale = float3(
+    abs(CurrScale.x) > 0.0001 ? CurrScale.x : 1.0,
+    abs(CurrScale.y) > 0.0001 ? CurrScale.y : 1.0,
+    abs(CurrScale.z) > 0.0001 ? CurrScale.z : 1.0);
+float3 LocalPosition = CurrentLocalRotated / SafeCurrScale;
+float3 InterpLocal = LocalPosition * InterpScale;
+
+float3 InterpRotated =
+    InterpLocal
+    + 2.0 * cross(
+        InterpQ.xyz,
+        cross(InterpQ.xyz, InterpLocal)
+        + InterpQ.w * InterpLocal);
+
+float3 InterpWorld = InterpPos + InterpRotated;
+return OriginalWPO + (InterpWorld - WorldPos);
+)ALGONA");
+
+		if (!AddCustomInput(*Custom, TEXT("WorldPos"), WorldPosition))
+		{
+			OutError = TEXT("cannot connect WorldPosition input");
+			return false;
+		}
+
+		for (int32 Index = 0; Index < InstanceDataExpressions.Num(); ++Index)
+		{
+			if (!AddCustomInput(
+				*Custom,
+				InstanceInputNames[Index],
+				InstanceDataExpressions[Index]))
+			{
+				OutError = TEXT("cannot connect instance data input");
+				return false;
+			}
+		}
+
+		for (int32 Index = 0; Index < AlphaExpressions.Num(); ++Index)
+		{
+			if (!AddCustomInput(
+				*Custom,
+				AlphaDescs[Index].Name,
+				AlphaExpressions[Index]))
+			{
+				OutError = TEXT("cannot connect alpha input");
+				return false;
+			}
+		}
+
+		if (!AddCustomInput(*Custom, TEXT("OriginalWPO"), OriginalWpoInput))
+		{
+			OutError = TEXT("cannot connect original WPO input");
+			return false;
+		}
+
+		EditorData->WorldPositionOffset.Connect(0, Custom);
+		RuntimeMaterial.bAlwaysEvaluateWorldPositionOffset = true;
+
+		UMaterialEditingLibrary::SetBaseMaterialUsage(
+			&RuntimeMaterial,
+			MATUSAGE_InstancedSkinnedMesh,
+			true);
+
+		Custom->PostEditChange();
+		RuntimeMaterial.PostEditChange();
+
+		const TArray<FString> CompileErrors =
+			UMaterialEditingLibrary::RecompileMaterial(&RuntimeMaterial);
+
+		if (!CompileErrors.IsEmpty())
+		{
+			OutError = FString::Join(CompileErrors, TEXT(" | "));
+			return false;
+		}
+
+		return true;
+	}
+#endif
 }
 
 AAlgonaArmyPresentationActor::AAlgonaArmyPresentationActor()
@@ -38,29 +401,47 @@ AAlgonaArmyPresentationActor::AAlgonaArmyPresentationActor()
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.bStartWithTickEnabled = true;
 
-	InstancedMeshComponent =
-		CreateDefaultSubobject<UInstancedStaticMeshComponent>(
-			TEXT("ArmyInstances"));
+	SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+	SetRootComponent(SceneRoot);
 
-	SetRootComponent(InstancedMeshComponent);
+	InstancedSkinnedMeshComponent =
+		CreateDefaultSubobject<UInstancedSkinnedMeshComponent>(TEXT("ArmySkinnedInstances"));
+	InstancedSkinnedMeshComponent->SetupAttachment(SceneRoot);
+	InstancedSkinnedMeshComponent->SetMobility(EComponentMobility::Movable);
+	InstancedSkinnedMeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	InstancedSkinnedMeshComponent->SetGenerateOverlapEvents(false);
+	InstancedSkinnedMeshComponent->SetCastShadow(false);
+	InstancedSkinnedMeshComponent->SetAnimationMinScreenSize(-1.0f);
 
-	InstancedMeshComponent->SetMobility(
-		EComponentMobility::Movable);
+	// UE 5.8 previous-instance transforms are for motion blur. Presentation
+	// carries its explicit interpolation pair in custom data instead.
+	InstancedSkinnedMeshComponent->SetHasPerInstancePrevTransforms(false);
+}
 
-	InstancedMeshComponent->SetCollisionEnabled(
-		ECollisionEnabled::NoCollision);
+void AAlgonaArmyPresentationActor::BeginPlay()
+{
+	Super::BeginPlay();
 
-	InstancedMeshComponent->SetGenerateOverlapEvents(false);
-	InstancedMeshComponent->SetCastShadow(false);
-
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> SoldierMesh(
-		TEXT("/Game/Archer.Archer"));
-
-	if (SoldierMesh.Succeeded())
+	AnimBank = LoadObject<UAnimBank>(nullptr, AnimBankPath);
+	if (!AnimBank)
 	{
-		InstancedMeshComponent->SetStaticMesh(
-			SoldierMesh.Object);
+		Fail(FString::Printf(TEXT("ISKM Presentation failed: cannot load %s"), AnimBankPath));
+		return;
 	}
+
+	if (!AnimBank->Asset)
+	{
+		Fail(TEXT("ISKM Presentation failed: NewAnimBank -> Mapping -> Asset is None"));
+		return;
+	}
+
+	if (AnimBank->Sequences.IsEmpty())
+	{
+		Fail(TEXT("ISKM Presentation failed: NewAnimBank has no Sequences"));
+		return;
+	}
+
+	ValidateInstancingBuildSettings();
 }
 
 void AAlgonaArmyPresentationActor::SetPresentationCamera(
@@ -72,520 +453,624 @@ void AAlgonaArmyPresentationActor::SetPresentationCamera(
 
 void AAlgonaArmyPresentationActor::Tick(float DeltaSeconds)
 {
-    Super::Tick(DeltaSeconds);
+	Super::Tick(DeltaSeconds);
 
-    UWorld* World = GetWorld();
-    if (!World || !InstancedMeshComponent)
-    {
-        return;
-    }
+	if (bRendererFailed)
+	{
+		return;
+	}
 
-    UAlgonaSimulationSubsystem* Simulation =
-        World->GetSubsystem<UAlgonaSimulationSubsystem>();
+	if (!bRendererReady && !PrepareSkinnedRenderer())
+	{
+		return;
+	}
 
-    if (!Simulation)
-    {
-        return;
-    }
+	UWorld* World = GetWorld();
+	if (!World || !InstancedSkinnedMeshComponent)
+	{
+		return;
+	}
 
-    VisibilityRefreshElapsedSeconds +=
-        FMath::Max(DeltaSeconds, 0.0f);
+	UAlgonaSimulationSubsystem* Simulation =
+		World->GetSubsystem<UAlgonaSimulationSubsystem>();
+	if (!Simulation)
+	{
+		return;
+	}
 
-    const uint64 CurrentSimulationTick =
-        Simulation->GetSimulationTick();
+	VisibilityRefreshElapsedSeconds += FMath::Max(DeltaSeconds, 0.0f);
 
-    const uint64 CurrentRevision =
-        Simulation->GetStateRevision();
+	const uint64 CurrentSimulationTick = Simulation->GetSimulationTick();
+	const uint64 CurrentRevision = Simulation->GetStateRevision();
 
-    bool bSimulationChanged = false;
+	bool bSimulationChanged = false;
+	bool bForceSnapshotSnap = false;
 
-    if (!bHasCapturedState
-        || CurrentRevision != LastStateRevision)
-    {
-        CaptureLatestState(*Simulation);
+	if (!bHasCapturedState || CurrentRevision != LastStateRevision)
+	{
+		bForceSnapshotSnap =
+			bHasCapturedState && CurrentRevision > LastStateRevision + 1;
 
-        LastStateRevision = CurrentRevision;
-        bHasCapturedState = true;
-        bSimulationChanged = true;
-    }
+		CaptureLatestState(*Simulation);
+		LastStateRevision = CurrentRevision;
+		bHasCapturedState = true;
+		bSimulationChanged = true;
+	}
 
-    const bool bCullingEnabled =
-        CVarAlgonaP1PresentationCameraCull
-            .GetValueOnGameThread() != 0;
+	const bool bCullingEnabled =
+		IsAlgonaP1PresentationCameraCullingEnabled();
+	const bool bCullingModeChanged =
+		!bHasCullingMode || bCullingEnabled != bLastCullingEnabled;
 
-    const bool bCullingModeChanged =
-        !bHasCullingMode
-        || bCullingEnabled != bLastCullingEnabled;
+	// Screen-significance tiers depend on zoom even when camera culling is
+	// disabled, so camera changes always invalidate this working set.
+	const bool bCameraChanged = HasCameraViewChanged();
+	const bool bRefreshForCamera =
+		bCameraChanged
+		&& VisibilityRefreshElapsedSeconds >= VisibilityRefreshIntervalSeconds;
 
-    const bool bCameraChanged =
-        bCullingEnabled
-        && HasCameraViewChanged();
+	if (bSimulationChanged || bCullingModeChanged || bRefreshForCamera)
+	{
+		RefreshPresentationWorkingSet(
+			bSimulationChanged,
+			bForceSnapshotSnap,
+			Simulation->GetFixedStepSeconds());
 
-    const bool bRefreshForCamera =
-        bCameraChanged
-        && VisibilityRefreshElapsedSeconds
-            >= VisibilityRefreshIntervalSeconds;
+		if (bRendererFailed)
+		{
+			return;
+		}
 
-    if (bSimulationChanged
-        || bCullingModeChanged
-        || bRefreshForCamera)
-    {
-        RefreshPresentationWorkingSet(
-            bSimulationChanged);
+		CacheCurrentCameraView();
+		VisibilityRefreshElapsedSeconds = 0.0f;
+		bLastCullingEnabled = bCullingEnabled;
+		bHasCullingMode = true;
+	}
 
-        CacheCurrentCameraView();
+	const bool bSimulationAdvancedWithoutStateChange =
+		!bSimulationChanged && CurrentSimulationTick != LastSimulationTick;
 
-        VisibilityRefreshElapsedSeconds = 0.0f;
+	if (bInterpolationActive)
+	{
+		if (bSimulationAdvancedWithoutStateChange)
+		{
+			CompleteBufferedInterpolation();
+		}
+		else
+		{
+			UpdateGpuInterpolationAlphas(
+				Simulation->GetInterpolationAlpha(),
+				DeltaSeconds);
+		}
+	}
 
-        bLastCullingEnabled = bCullingEnabled;
-        bHasCullingMode = true;
-    }
-
-    /*
-     * Если после последнего изменившего Transform step
-     * прошёл ещё один Simulation tick без нового state,
-     * значит движение закончилось.
-     *
-     * Доводим изображение точно до последнего Target.
-     */
-    const bool bSimulationAdvancedWithoutStateChange =
-        !bSimulationChanged
-        && CurrentSimulationTick != LastSimulationTick;
-
-    if (bInterpolationActive)
-    {
-        if (bSimulationAdvancedWithoutStateChange)
-        {
-            RenderTransforms = TargetTransforms;
-
-            if (!RenderTransforms.IsEmpty())
-            {
-                InstancedMeshComponent
-                    ->BatchUpdateInstancesTransforms(
-                        0,
-                        RenderTransforms,
-                        true,
-                        true,
-                        true);
-            }
-
-            bInterpolationActive = false;
-        }
-        else
-        {
-            ApplyInterpolatedTransforms(
-                Simulation->GetInterpolationAlpha());
-        }
-    }
-
-    LastSimulationTick = CurrentSimulationTick;
+	LastSimulationTick = CurrentSimulationTick;
 
 #if !UE_BUILD_SHIPPING
+	DebugCounterElapsedSeconds += FMath::Max(DeltaSeconds, 0.0f);
+	if (DebugCounterElapsedSeconds >= 0.2f)
+	{
+		DebugCounterElapsedSeconds = 0.0f;
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(
+				42001,
+				0.25f,
+				FColor::White,
+				FString::Printf(
+					TEXT("Presented ISKM: %d   Simulation: %d   UnitPx: %.1f   MediumCadence: %d   MedMaxSpeed: %.0f cm/s   Alpha N/M: %.2f/%.2f"),
+					InstancedSkinnedMeshComponent->GetInstanceCount(),
+					CachedSnapshots.Num(),
+					ProjectedUnitHeightPixels,
+					MediumFrameCadence,
+					MaxMediumObservedSpeedCmPerSecond,
+					NearInterpolationAlpha,
+					MediumInterpolationAlpha));
+		}
+	}
+#endif
+}
 
-    DebugCounterElapsedSeconds +=
-        FMath::Max(DeltaSeconds, 0.0f);
+bool AAlgonaArmyPresentationActor::PrepareSkinnedRenderer()
+{
+	if (bRendererReady)
+	{
+		return true;
+	}
 
-    if (DebugCounterElapsedSeconds >= 0.2f)
-    {
-        DebugCounterElapsedSeconds = 0.0f;
+	if (bRendererFailed || !AnimBank || !InstancedSkinnedMeshComponent)
+	{
+		return false;
+	}
 
-        if (GEngine)
-        {
-            GEngine->AddOnScreenDebugMessage(
-                42001,
-                0.25f,
-                FColor::White,
-                FString::Printf(
-                    TEXT("Presented: %d   Simulation: %d"),
-                    InstancedMeshComponent->GetInstanceCount(),
-                    CachedSnapshots.Num()));
-        }
-    }
+	if (AnimBank->IsCompiling())
+	{
+		ProviderReadyFrames = 0;
+		return false;
+	}
 
+	if (!SequenceProvider)
+	{
+		SequenceProvider = CreateSequenceProvider(AnimBank);
+		if (!SequenceProvider)
+		{
+			Fail(TEXT("ISKM Presentation failed: CreateFromAnimBank returned null"));
+			return false;
+		}
+
+		ProviderReadyFrames = 0;
+		return false;
+	}
+
+	if (SequenceProvider->IsCompiling())
+	{
+		ProviderReadyFrames = 0;
+		return false;
+	}
+
+	++ProviderReadyFrames;
+	if (ProviderReadyFrames < 3)
+	{
+		return false;
+	}
+
+	InstancedSkinnedMeshComponent->ClearInstances();
+	InstancedSkinnedMeshComponent->SetTransformProvider(nullptr);
+	InstancedSkinnedMeshComponent->SetSkinnedAssetAndUpdate(AnimBank->Asset.Get(), true);
+	InstancedSkinnedMeshComponent->SetTransformProvider(SequenceProvider);
+	InstancedSkinnedMeshComponent->SetNumCustomDataFloats(GpuInstanceCustomDataFloatCount);
+
+	if (!BuildGpuInterpolationMaterials())
+	{
+		return false;
+	}
+
+	CompleteBufferedInterpolation();
+	bRendererReady = true;
+
+	Succeed(TEXT("ISKM Presentation ready: animation + GPU buffered interpolation"));
+	return true;
+}
+
+UAnimSequenceTransformProviderData*
+AAlgonaArmyPresentationActor::CreateSequenceProvider(UAnimBank* InAnimBank)
+{
+	if (!InAnimBank)
+	{
+		return nullptr;
+	}
+
+	UClass* ProviderClass = UAnimSequenceTransformProviderData::StaticClass();
+	UFunction* Function =
+		ProviderClass ? ProviderClass->FindFunctionByName(TEXT("CreateFromAnimBank")) : nullptr;
+
+	if (!ProviderClass || !Function)
+	{
+		return nullptr;
+	}
+
+	struct FCreateFromAnimBankParams
+	{
+		UAnimBank* InAnimBank = nullptr;
+		UAnimSequenceTransformProviderData* ReturnValue = nullptr;
+	};
+
+	FCreateFromAnimBankParams Params;
+	Params.InAnimBank = InAnimBank;
+
+	UObject* ClassDefaultObject = ProviderClass->GetDefaultObject();
+	if (!ClassDefaultObject)
+	{
+		return nullptr;
+	}
+
+	ClassDefaultObject->ProcessEvent(Function, &Params);
+	return Params.ReturnValue;
+}
+
+bool AAlgonaArmyPresentationActor::ValidateInstancingBuildSettings()
+{
+	if (!AnimBank || !AnimBank->Asset)
+	{
+		return false;
+	}
+
+	const FSkeletalMeshLODInfo* LOD0 = AnimBank->Asset->GetLODInfo(0);
+	if (!LOD0)
+	{
+		Fail(TEXT("ISKM Presentation failed: skinned asset has no LOD0 info"));
+		return false;
+	}
+
+	if (!LOD0->BuildSettings.bOptimizeForInstancing)
+	{
+		Fail(TEXT("ISKM Presentation failed: LOD0 Optimize For Instancing is OFF"));
+		return false;
+	}
+
+	return true;
+}
+
+bool AAlgonaArmyPresentationActor::BuildGpuInterpolationMaterials()
+{
+#if !WITH_EDITOR
+	Fail(TEXT(
+		"ISKM Presentation currently needs an Editor build because the proven P1 GPU interpolation path injects transient WPO materials at runtime. Replace this bridge with authored production materials before packaged builds."));
+	return false;
+#else
+	if (!AnimBank || !AnimBank->Asset || !InstancedSkinnedMeshComponent)
+	{
+		return false;
+	}
+
+	RuntimeInterpolationMaterials.Reset();
+
+	const TArray<FSkeletalMaterial>& SourceMaterials = AnimBank->Asset->GetMaterials();
+	RuntimeInterpolationMaterials.Reserve(SourceMaterials.Num());
+
+	for (int32 MaterialIndex = 0; MaterialIndex < SourceMaterials.Num(); ++MaterialIndex)
+	{
+		UMaterialInterface* SourceInterface = SourceMaterials[MaterialIndex].MaterialInterface;
+		if (!SourceInterface)
+		{
+			Fail(FString::Printf(
+				TEXT("ISKM Presentation failed: material slot %d is null"),
+				MaterialIndex));
+			return false;
+		}
+
+		UMaterial* SourceBaseMaterial = SourceInterface->GetMaterial();
+		if (!SourceBaseMaterial)
+		{
+			Fail(FString::Printf(
+				TEXT("ISKM Presentation failed: material slot %d has no base material"),
+				MaterialIndex));
+			return false;
+		}
+
+		UMaterial* RuntimeBaseMaterial = DuplicateObject<UMaterial>(SourceBaseMaterial, this);
+		if (!RuntimeBaseMaterial)
+		{
+			Fail(FString::Printf(
+				TEXT("ISKM Presentation failed: cannot duplicate material slot %d"),
+				MaterialIndex));
+			return false;
+		}
+
+		RuntimeBaseMaterial->SetFlags(RF_Transient);
+
+		FString MaterialError;
+		if (!InjectGpuInterpolationIntoMaterial(*RuntimeBaseMaterial, MaterialError))
+		{
+			Fail(FString::Printf(
+				TEXT("ISKM Presentation GPU material %d failed: %s"),
+				MaterialIndex,
+				*MaterialError));
+			return false;
+		}
+
+		UMaterialInterface* RuntimeInterface = RuntimeBaseMaterial;
+
+		if (SourceInterface != SourceBaseMaterial)
+		{
+			UMaterialInstanceConstant* RuntimeInstance =
+				NewObject<UMaterialInstanceConstant>(this, NAME_None, RF_Transient);
+
+			if (!RuntimeInstance)
+			{
+				Fail(TEXT("ISKM Presentation failed: cannot create transient material instance"));
+				return false;
+			}
+
+			RuntimeInstance->SetParentEditorOnly(RuntimeBaseMaterial, false);
+			RuntimeInstance->CopyMaterialUniformParametersEditorOnly(SourceInterface, true);
+			RuntimeInstance->PostEditChange();
+			RuntimeInterface = RuntimeInstance;
+		}
+
+		// READY must not include transient shader compilation in benchmarks.
+		RuntimeInterface->EnsureIsComplete();
+		RuntimeInterpolationMaterials.Add(RuntimeInterface);
+		InstancedSkinnedMeshComponent->SetMaterial(MaterialIndex, RuntimeInterface);
+	}
+
+	return true;
 #endif
 }
 
 void AAlgonaArmyPresentationActor::CaptureLatestState(
 	UAlgonaSimulationSubsystem& Simulation)
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(
-		AlgonaPresentation_CaptureState);
-
-	/*
-	 * Важно:
-	 * здесь всё ещё разрешено получить все 100k.
-	 *
-	 * Это сознательно оставлено для P1 experiment:
-	 * мы отдельно проверяем стоимость Simulation/export
-	 * и стоимость per-frame Presentation.
-	 */
-	Simulation.ExportSoldierSnapshots(
-		CachedSnapshots,
-		MaxPresentedEntities);
+	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaPresentation_CaptureState);
+	Simulation.ExportSoldierSnapshots(CachedSnapshots, MaxPresentedEntities);
 }
 
 void AAlgonaArmyPresentationActor::RefreshPresentationWorkingSet(
-	bool bSimulationChanged)
+	bool bSimulationChanged,
+	bool bForceSnapshotSnap,
+	double SimulationStepSeconds)
 {
-    TRACE_CPUPROFILER_EVENT_SCOPE(
-        AlgonaPresentation_BuildCameraWorkingSet);
+	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaPresentation_BuildCameraWorkingSet);
 
-    NextPresentedEntityIds.Reset();
-    NextTargetTransforms.Reset();
+	NextPresentedEntityIds.Reset();
+	NextCurrentTransforms.Reset();
+	NextInterpolationTiers.Reset();
+	NextObservedLinearSpeedsCmPerSecond.Reset();
 
-    NextPresentedEntityIds.Reserve(
-        CachedSnapshots.Num());
+	NextPresentedEntityIds.Reserve(CachedSnapshots.Num());
+	NextCurrentTransforms.Reserve(CachedSnapshots.Num());
 
-    NextTargetTransforms.Reserve(
-        CachedSnapshots.Num());
+	LastSimulationStepSeconds = FMath::Max(
+		SimulationStepSeconds,
+		UE_DOUBLE_SMALL_NUMBER);
 
-    UCameraComponent* Camera =
-        PresentationCamera.Get();
+	FAlgonaPresentationView View;
+	UWorld* World = GetWorld();
+	const UCameraComponent* Camera = PresentationCamera.Get();
+	const bool bHasValidView =
+		World && Camera && View.Build(*World, *Camera);
+	const bool bUseCameraCulling =
+		IsAlgonaP1PresentationCameraCullingEnabled() && bHasValidView;
 
-    const bool bCameraCullingEnabled =
-        CVarAlgonaP1PresentationCameraCull
-            .GetValueOnGameThread() != 0;
+	ProjectedUnitHeightPixels =
+		bHasValidView
+			? View.GetProjectedVerticalSizePixels(ReferenceUnitHeightCm)
+			: 0.0f;
+	GroundPixelsPerWorldUnit =
+		bHasValidView ? View.GetGroundPixelsPerWorldUnit() : 0.0f;
 
-    const bool bUseCameraCulling =
-        bCameraCullingEnabled
-        && Camera
-        && Camera->ProjectionMode
-            == ECameraProjectionMode::Orthographic;
+	const FQuat MeshFacingCorrection =
+		FRotator(0.0f, -90.0f, 0.0f).Quaternion();
 
-    FVector GroundTopLeft = FVector::ZeroVector;
-    FVector GroundTopRight = FVector::ZeroVector;
-    FVector GroundBottomLeft = FVector::ZeroVector;
+	for (const FAlgonaSoldierSnapshot& Snapshot : CachedSnapshots)
+	{
+		if (bUseCameraCulling
+			&& !View.IsGroundPointVisible(Snapshot.Position, CullingGuardPixels))
+		{
+			continue;
+		}
 
-    int32 ViewportWidth = 0;
-    int32 ViewportHeight = 0;
+		NextPresentedEntityIds.Add(Snapshot.EntityId);
+		NextCurrentTransforms.Emplace(
+			(Snapshot.Facing * MeshFacingCorrection).GetNormalized(),
+			Snapshot.Position,
+			InstanceScale);
+	}
 
-    bool bUseGroundViewCulling = false;
+	const bool bSameEntityOrder = HasSameEntityOrder(NextPresentedEntityIds);
 
-    if (bUseCameraCulling)
-    {
-        UWorld* World = GetWorld();
+	if (!bSameEntityOrder)
+	{
+		TMap<uint32, int32> OldIndexByEntityId;
+		OldIndexByEntityId.Reserve(PresentedEntityIds.Num());
 
-        APlayerController* PlayerController =
-            World
-                ? World->GetFirstPlayerController()
-                : nullptr;
+		for (int32 OldIndex = 0; OldIndex < PresentedEntityIds.Num(); ++OldIndex)
+		{
+			OldIndexByEntityId.Add(PresentedEntityIds[OldIndex], OldIndex);
+		}
 
-        if (PlayerController)
-        {
-            PlayerController->GetViewportSize(
-                ViewportWidth,
-                ViewportHeight);
+		TArray<FTransform> NewPreviousTransforms;
+		TArray<FTransform> NewCurrentTransforms;
+		TArray<float> NewObservedLinearSpeedsCmPerSecond;
+		TArray<EAlgonaPresentationInterpolationTier> NewTiers;
 
-            auto DeprojectToGround =
-                [PlayerController](
-                    const FVector2D& ScreenPosition,
-                    FVector& OutGroundPosition)
-                {
-                    FVector WorldPosition;
-                    FVector WorldDirection;
+		NewPreviousTransforms.SetNumUninitialized(NextPresentedEntityIds.Num());
+		NewCurrentTransforms.SetNumUninitialized(NextPresentedEntityIds.Num());
+		NewObservedLinearSpeedsCmPerSecond.SetNumZeroed(NextPresentedEntityIds.Num());
+		NewTiers.SetNumUninitialized(NextPresentedEntityIds.Num());
 
-                    if (!UGameplayStatics::DeprojectScreenToWorld(
-                        PlayerController,
-                        ScreenPosition,
-                        WorldPosition,
-                        WorldDirection))
-                    {
-                        return false;
-                    }
+		bool bAnyInterpolatedTransformChanged = false;
 
-                    if (FMath::Abs(WorldDirection.Z)
-                        <= KINDA_SMALL_NUMBER)
-                    {
-                        return false;
-                    }
+		for (int32 NewIndex = 0; NewIndex < NextPresentedEntityIds.Num(); ++NewIndex)
+		{
+			const uint32 EntityId = NextPresentedEntityIds[NewIndex];
+			const FTransform& SnapshotTransform = NextCurrentTransforms[NewIndex];
+			const int32* OldIndexPtr = OldIndexByEntityId.Find(EntityId);
 
-                    const double Distance =
-                        -WorldPosition.Z
-                        / WorldDirection.Z;
+			if (OldIndexPtr
+				&& PreviousTransforms.IsValidIndex(*OldIndexPtr)
+				&& CurrentTransforms.IsValidIndex(*OldIndexPtr)
+				&& InterpolationTiers.IsValidIndex(*OldIndexPtr))
+			{
+				const int32 OldIndex = *OldIndexPtr;
+				float ObservedSpeedCmPerSecond = 0.0f;
 
-                    if (Distance < 0.0)
-                    {
-                        return false;
-                    }
+				if (bSimulationChanged && !bForceSnapshotSnap)
+				{
+					ObservedSpeedCmPerSecond = static_cast<float>(
+						FVector::Dist(
+							CurrentTransforms[OldIndex].GetLocation(),
+							SnapshotTransform.GetLocation())
+						/ LastSimulationStepSeconds);
+				}
+				else if (ObservedLinearSpeedsCmPerSecond.IsValidIndex(OldIndex))
+				{
+					ObservedSpeedCmPerSecond =
+						ObservedLinearSpeedsCmPerSecond[OldIndex];
+				}
 
-                    OutGroundPosition =
-                        WorldPosition
-                        + WorldDirection * Distance;
+				NewObservedLinearSpeedsCmPerSecond[NewIndex] =
+					ObservedSpeedCmPerSecond;
 
-                    OutGroundPosition.Z = 0.0;
+				const EAlgonaPresentationInterpolationTier NewTier =
+					DetermineInterpolationTier(
+						ObservedSpeedCmPerSecond,
+						InterpolationTiers[OldIndex],
+						true);
 
-                    return true;
-                };
+				NewTiers[NewIndex] = NewTier;
 
-            if (ViewportWidth > 0
-                && ViewportHeight > 0)
-            {
-                bUseGroundViewCulling =
-                    DeprojectToGround(
-                        FVector2D(0.0, 0.0),
-                        GroundTopLeft)
-                    && DeprojectToGround(
-                        FVector2D(
-                            static_cast<double>(ViewportWidth),
-                            0.0),
-                        GroundTopRight)
-                    && DeprojectToGround(
-                        FVector2D(
-                            0.0,
-                            static_cast<double>(ViewportHeight)),
-                        GroundBottomLeft);
-            }
-        }
-    }
+				if (bSimulationChanged)
+				{
+					NewCurrentTransforms[NewIndex] = SnapshotTransform;
+					NewPreviousTransforms[NewIndex] = CurrentTransforms[OldIndex];
 
-    const FVector ViewRight =
-        GroundTopRight - GroundTopLeft;
+					if (bForceSnapshotSnap
+						|| ShouldSnapInterpolation(
+							NewPreviousTransforms[NewIndex],
+							NewCurrentTransforms[NewIndex]))
+					{
+						NewPreviousTransforms[NewIndex] = NewCurrentTransforms[NewIndex];
+					}
+					else if (NewTier != EAlgonaPresentationInterpolationTier::Far
+						&& !NewPreviousTransforms[NewIndex].Equals(
+							NewCurrentTransforms[NewIndex],
+							0.01f))
+					{
+						bAnyInterpolatedTransformChanged = true;
+					}
+				}
+				else
+				{
+					NewPreviousTransforms[NewIndex] = PreviousTransforms[OldIndex];
+					NewCurrentTransforms[NewIndex] = CurrentTransforms[OldIndex];
+				}
+			}
+			else
+			{
+				// Spawn or camera re-entry: never interpolate from stale data.
+				NewPreviousTransforms[NewIndex] = SnapshotTransform;
+				NewCurrentTransforms[NewIndex] = SnapshotTransform;
+				NewObservedLinearSpeedsCmPerSecond[NewIndex] = 0.0f;
+				NewTiers[NewIndex] = DetermineInterpolationTier(
+					0.0f,
+					EAlgonaPresentationInterpolationTier::Near,
+					false);
+			}
+		}
 
-    const FVector ViewDown =
-        GroundBottomLeft - GroundTopLeft;
+		PresentedEntityIds = MoveTemp(NextPresentedEntityIds);
+		PreviousTransforms = MoveTemp(NewPreviousTransforms);
+		CurrentTransforms = MoveTemp(NewCurrentTransforms);
+		ObservedLinearSpeedsCmPerSecond = MoveTemp(NewObservedLinearSpeedsCmPerSecond);
+		InterpolationTiers = MoveTemp(NewTiers);
+		RefreshInterpolationTierPresence();
 
-    const double ViewDeterminant =
-        ViewRight.X * ViewDown.Y
-        - ViewRight.Y * ViewDown.X;
+		if (bSimulationChanged)
+		{
+			bInterpolationActive = bAnyInterpolatedTransformChanged;
+			if (bInterpolationActive)
+			{
+				BeginBufferedInterpolation();
+			}
+			else
+			{
+				CompleteBufferedInterpolation();
+			}
+		}
 
-    constexpr double CullingGuardPixels = 128.0;
+		RebuildInstances();
+		return;
+	}
 
-    const double HorizontalGuard =
-        ViewportWidth > 0
-            ? CullingGuardPixels
-                / static_cast<double>(ViewportWidth)
-            : 0.0;
+	NextInterpolationTiers.SetNumUninitialized(NextPresentedEntityIds.Num());
+	NextObservedLinearSpeedsCmPerSecond.SetNumZeroed(NextPresentedEntityIds.Num());
 
-    const double VerticalGuard =
-        ViewportHeight > 0
-            ? CullingGuardPixels
-                / static_cast<double>(ViewportHeight)
-            : 0.0;
+	for (int32 Index = 0; Index < NextPresentedEntityIds.Num(); ++Index)
+	{
+		const bool bHasPreviousTier = InterpolationTiers.IsValidIndex(Index);
+		float ObservedSpeedCmPerSecond = 0.0f;
 
-    const FQuat MeshFacingCorrection =
-        FRotator(0.0f, -90.0f, 0.0f)
-            .Quaternion();
+		if (bSimulationChanged
+			&& !bForceSnapshotSnap
+			&& CurrentTransforms.IsValidIndex(Index))
+		{
+			ObservedSpeedCmPerSecond = static_cast<float>(
+				FVector::Dist(
+					CurrentTransforms[Index].GetLocation(),
+					NextCurrentTransforms[Index].GetLocation())
+				/ LastSimulationStepSeconds);
+		}
+		else if (ObservedLinearSpeedsCmPerSecond.IsValidIndex(Index))
+		{
+			ObservedSpeedCmPerSecond = ObservedLinearSpeedsCmPerSecond[Index];
+		}
 
-    for (const FAlgonaSoldierSnapshot& Snapshot
-        : CachedSnapshots)
-    {
-        if (bUseGroundViewCulling
-            && FMath::Abs(ViewDeterminant)
-                > UE_DOUBLE_SMALL_NUMBER)
-        {
-            const FVector ToSoldier =
-                Snapshot.Position - GroundTopLeft;
+		NextObservedLinearSpeedsCmPerSecond[Index] = ObservedSpeedCmPerSecond;
+		NextInterpolationTiers[Index] = DetermineInterpolationTier(
+			ObservedSpeedCmPerSecond,
+			bHasPreviousTier
+				? InterpolationTiers[Index]
+				: EAlgonaPresentationInterpolationTier::Near,
+			bHasPreviousTier);
+	}
 
-            const double Horizontal =
-                (
-                    ToSoldier.X * ViewDown.Y
-                    - ToSoldier.Y * ViewDown.X
-                )
-                / ViewDeterminant;
+	if (!bSimulationChanged)
+	{
+		ObservedLinearSpeedsCmPerSecond = MoveTemp(NextObservedLinearSpeedsCmPerSecond);
+		InterpolationTiers = MoveTemp(NextInterpolationTiers);
+		RefreshInterpolationTierPresence();
 
-            const double Vertical =
-                (
-                    ViewRight.X * ToSoldier.Y
-                    - ViewRight.Y * ToSoldier.X
-                )
-                / ViewDeterminant;
+		for (int32 Index = 0; Index < InstanceIds.Num(); ++Index)
+		{
+			if (!UploadInstanceGpuData(Index))
+			{
+				return;
+			}
+		}
+		return;
+	}
 
-            if (Horizontal < -HorizontalGuard
-                || Horizontal > 1.0 + HorizontalGuard
-                || Vertical < -VerticalGuard
-                || Vertical > 1.0 + VerticalGuard)
-            {
-                continue;
-            }
-        }
+	PreviousTransforms = CurrentTransforms;
+	CurrentTransforms = MoveTemp(NextCurrentTransforms);
+	ObservedLinearSpeedsCmPerSecond = MoveTemp(NextObservedLinearSpeedsCmPerSecond);
+	InterpolationTiers = MoveTemp(NextInterpolationTiers);
+	RefreshInterpolationTierPresence();
 
-        const FQuat PresentationRotation =
-            (
-                Snapshot.Facing
-                * MeshFacingCorrection
-            ).GetNormalized();
+	if (PreviousTransforms.Num() != CurrentTransforms.Num()
+		|| ObservedLinearSpeedsCmPerSecond.Num() != CurrentTransforms.Num()
+		|| InterpolationTiers.Num() != CurrentTransforms.Num())
+	{
+		Fail(TEXT("ISKM Presentation failed: interpolation buffers lost entity alignment"));
+		return;
+	}
 
-        NextPresentedEntityIds.Add(
-            Snapshot.EntityId);
+	bool bAnyInterpolatedTransformChanged = false;
 
-        NextTargetTransforms.Emplace(
-            PresentationRotation,
-            Snapshot.Position,
-            InstanceScale);
-    }
+	for (int32 Index = 0; Index < CurrentTransforms.Num(); ++Index)
+	{
+		if (bForceSnapshotSnap
+			|| ShouldSnapInterpolation(PreviousTransforms[Index], CurrentTransforms[Index]))
+		{
+			PreviousTransforms[Index] = CurrentTransforms[Index];
+			continue;
+		}
 
-    const bool bSameEntityOrder =
-    HasSameEntityOrder(
-        NextPresentedEntityIds);
+		if (InterpolationTiers[Index] != EAlgonaPresentationInterpolationTier::Far
+			&& !PreviousTransforms[Index].Equals(CurrentTransforms[Index], 0.01f))
+		{
+			bAnyInterpolatedTransformChanged = true;
+		}
+	}
 
-if (!bSameEntityOrder)
-{
-    /*
-     * Visible set изменился.
-     *
-     * Не сбрасываем интерполяцию всех оставшихся
-     * на экране солдат: переносим их старое состояние
-     * по стабильному EntityId.
-     */
-    TMap<uint32, int32> OldIndexByEntityId;
+	bInterpolationActive = bAnyInterpolatedTransformChanged;
 
-    OldIndexByEntityId.Reserve(
-        PresentedEntityIds.Num());
+	if (!UploadSimulationStateToInstances())
+	{
+		return;
+	}
 
-    for (int32 OldIndex = 0;
-        OldIndex < PresentedEntityIds.Num();
-        ++OldIndex)
-    {
-        OldIndexByEntityId.Add(
-            PresentedEntityIds[OldIndex],
-            OldIndex);
-    }
-
-    TArray<FTransform> NewPreviousTransforms;
-    TArray<FTransform> NewRenderTransforms;
-
-    NewPreviousTransforms.SetNumUninitialized(
-        NextPresentedEntityIds.Num());
-
-    NewRenderTransforms.SetNumUninitialized(
-        NextPresentedEntityIds.Num());
-
-    bool bAnyTransformChanged = false;
-
-    for (int32 NewIndex = 0;
-        NewIndex < NextPresentedEntityIds.Num();
-        ++NewIndex)
-    {
-        const uint32 EntityId =
-            NextPresentedEntityIds[NewIndex];
-
-        const FTransform& NewTarget =
-            NextTargetTransforms[NewIndex];
-
-        const int32* OldIndexPtr =
-            OldIndexByEntityId.Find(EntityId);
-
-        if (OldIndexPtr
-            && PreviousTransforms.IsValidIndex(*OldIndexPtr)
-            && TargetTransforms.IsValidIndex(*OldIndexPtr)
-            && RenderTransforms.IsValidIndex(*OldIndexPtr))
-        {
-            const int32 OldIndex = *OldIndexPtr;
-
-            /*
-             * Уже видимый солдат сохраняет своё
-             * текущее визуальное положение.
-             */
-            NewRenderTransforms[NewIndex] =
-                RenderTransforms[OldIndex];
-
-            /*
-             * Если пришёл новый Simulation state,
-             * старый Target и есть настоящий state N-1.
-             *
-             * Если изменилась только камера,
-             * сохраняем текущую interpolation pair.
-             */
-            NewPreviousTransforms[NewIndex] =
-                bSimulationChanged
-                    ? TargetTransforms[OldIndex]
-                    : PreviousTransforms[OldIndex];
-
-            if (!NewPreviousTransforms[NewIndex]
-                    .Equals(NewTarget, 0.01f))
-            {
-                bAnyTransformChanged = true;
-            }
-        }
-        else
-        {
-            /*
-             * Солдат только что вошёл в camera working set.
-             * Предыдущего визуального состояния у нас нет,
-             * поэтому показываем его сразу в актуальной позиции.
-             */
-            NewPreviousTransforms[NewIndex] =
-                NewTarget;
-
-            NewRenderTransforms[NewIndex] =
-                NewTarget;
-        }
-    }
-
-    PresentedEntityIds =
-        MoveTemp(NextPresentedEntityIds);
-
-    PreviousTransforms =
-        MoveTemp(NewPreviousTransforms);
-
-    TargetTransforms =
-        MoveTemp(NextTargetTransforms);
-
-    RenderTransforms =
-        MoveTemp(NewRenderTransforms);
-
-    bInterpolationActive =
-        bAnyTransformChanged;
-
-    RebuildInstances();
-    return;
-}
-
-/*
- * Камера обновила working set,
- * но набор entities остался тем же.
- * Simulation state при этом не менялся —
- * interpolation pair не трогаем.
- */
-if (!bSimulationChanged)
-{
-    return;
-}
-
-/*
- * Ключевое отличие от старой системы:
- *
- * Previous = прошлый authoritative Simulation state,
- * а НЕ текущее промежуточное Render положение.
- */
-PreviousTransforms = TargetTransforms;
-
-bool bAnyTransformChanged = false;
-
-for (int32 Index = 0;
-    Index < NextTargetTransforms.Num();
-    ++Index)
-{
-    if (!NextTargetTransforms[Index].Equals(
-        TargetTransforms[Index],
-        0.01f))
-    {
-        bAnyTransformChanged = true;
-    }
-}
-
-TargetTransforms =
-    MoveTemp(NextTargetTransforms);
-
-bInterpolationActive =
-    bAnyTransformChanged;
+	if (bInterpolationActive)
+	{
+		BeginBufferedInterpolation();
+	}
+	else
+	{
+		CompleteBufferedInterpolation();
+	}
 }
 
 bool AAlgonaArmyPresentationActor::HasSameEntityOrder(
 	const TArray<uint32>& CandidateEntityIds) const
 {
-	if (PresentedEntityIds.Num()
-		!= CandidateEntityIds.Num())
+	if (PresentedEntityIds.Num() != CandidateEntityIds.Num())
 	{
 		return false;
 	}
 
-	for (int32 Index = 0;
-		Index < CandidateEntityIds.Num();
-		++Index)
+	for (int32 Index = 0; Index < CandidateEntityIds.Num(); ++Index)
 	{
-		if (PresentedEntityIds[Index]
-			!= CandidateEntityIds[Index])
+		if (PresentedEntityIds[Index] != CandidateEntityIds[Index])
 		{
 			return false;
 		}
@@ -596,9 +1081,7 @@ bool AAlgonaArmyPresentationActor::HasSameEntityOrder(
 
 bool AAlgonaArmyPresentationActor::HasCameraViewChanged() const
 {
-	const UCameraComponent* Camera =
-		PresentationCamera.Get();
-
+	const UCameraComponent* Camera = PresentationCamera.Get();
 	if (!Camera)
 	{
 		return false;
@@ -609,141 +1092,408 @@ bool AAlgonaArmyPresentationActor::HasCameraViewChanged() const
 		return true;
 	}
 
-	if (!Camera
-		->GetComponentTransform()
-		.Equals(
-			LastCameraTransform,
-			0.01f))
-	{
-		return true;
-	}
-
-	if (!Camera
-	   ->GetComponentTransform()
-	   .Equals(
-		  LastCameraTransform,
-		  0.01f))
-	{
-		return true;
-	}
-
-	if (!FMath::IsNearlyEqual(
-	   Camera->OrthoWidth,
-	   LastCameraOrthoWidth,
-	   0.01f))
-	{
-		return true;
-	}
-
-	return !FMath::IsNearlyEqual(
-	   Camera->AspectRatio,
-	   LastCameraAspectRatio,
-	   0.001f);
+	return !Camera->GetComponentTransform().Equals(LastCameraTransform, 0.01f)
+		|| !FMath::IsNearlyEqual(Camera->OrthoWidth, LastCameraOrthoWidth, 0.01f)
+		|| !FMath::IsNearlyEqual(Camera->AspectRatio, LastCameraAspectRatio, 0.001f);
 }
 
 void AAlgonaArmyPresentationActor::CacheCurrentCameraView()
 {
-	const UCameraComponent* Camera =
-		PresentationCamera.Get();
-
+	const UCameraComponent* Camera = PresentationCamera.Get();
 	if (!Camera)
 	{
 		bHasCameraView = false;
 		return;
 	}
 
-	LastCameraTransform =
-		Camera->GetComponentTransform();
-
-	LastCameraOrthoWidth =
-		Camera->OrthoWidth;
-	
-	LastCameraAspectRatio =
-		Camera->AspectRatio;
-	
+	LastCameraTransform = Camera->GetComponentTransform();
+	LastCameraOrthoWidth = Camera->OrthoWidth;
+	LastCameraAspectRatio = Camera->AspectRatio;
 	bHasCameraView = true;
 }
 
-void AAlgonaArmyPresentationActor::RebuildInstances()
+EAlgonaPresentationInterpolationTier
+AAlgonaArmyPresentationActor::DetermineInterpolationTier(
+	float LinearSpeedCmPerSecond,
+	EAlgonaPresentationInterpolationTier PreviousTier,
+	bool bHasPreviousTier) const
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(
-		AlgonaPresentation_RebuildInstances);
+	const UCameraComponent* Camera = PresentationCamera.Get();
 
-	InstancedMeshComponent->ClearInstances();
-
-	if (RenderTransforms.IsEmpty())
+	if (!Camera
+		|| Camera->ProjectionMode != ECameraProjectionMode::Orthographic
+		|| ProjectedUnitHeightPixels <= 0.0f
+		|| GroundPixelsPerWorldUnit <= 0.0f)
 	{
-		return;
+		return EAlgonaPresentationInterpolationTier::Near;
 	}
 
-	InstancedMeshComponent->PreAllocateInstancesMemory(
-		RenderTransforms.Num());
+	const double UnitPixels = static_cast<double>(ProjectedUnitHeightPixels);
+	const double SafeSpeedCmPerSecond =
+		FMath::Max(static_cast<double>(LinearSpeedCmPerSecond), 0.0);
+	const double SnapshotStepPixels =
+		SafeSpeedCmPerSecond
+		* LastSimulationStepSeconds
+		* static_cast<double>(GroundPixelsPerWorldUnit);
 
-	InstancedMeshComponent->AddInstances(
-		RenderTransforms,
-		false,
-		true,
-		false);
+	auto ClassifyRaw = [SnapshotStepPixels](double HeightPixels)
+	{
+		if (HeightPixels >= NearMinProjectedHeightPixels)
+		{
+			return EAlgonaPresentationInterpolationTier::Near;
+		}
+
+		if (HeightPixels <= FarMaxProjectedHeightPixels
+			&& SnapshotStepPixels <= MediumMaxVisualStepPixels)
+		{
+			return EAlgonaPresentationInterpolationTier::Far;
+		}
+
+		return EAlgonaPresentationInterpolationTier::Medium;
+	};
+
+	if (!bHasPreviousTier)
+	{
+		return ClassifyRaw(UnitPixels);
+	}
+
+	switch (PreviousTier)
+	{
+	case EAlgonaPresentationInterpolationTier::Near:
+		if (UnitPixels >= NearMinProjectedHeightPixels * (1.0 - TierHysteresis))
+		{
+			return EAlgonaPresentationInterpolationTier::Near;
+		}
+		break;
+
+	case EAlgonaPresentationInterpolationTier::Medium:
+	{
+		const bool bClearlyNear =
+			UnitPixels >= NearMinProjectedHeightPixels * (1.0 + TierHysteresis);
+		const bool bClearlyFar =
+			UnitPixels <= FarMaxProjectedHeightPixels * (1.0 - TierHysteresis)
+			&& SnapshotStepPixels <= MediumMaxVisualStepPixels * (1.0 - TierHysteresis);
+
+		if (!bClearlyNear && !bClearlyFar)
+		{
+			return EAlgonaPresentationInterpolationTier::Medium;
+		}
+		break;
+	}
+
+	case EAlgonaPresentationInterpolationTier::Far:
+		if (UnitPixels <= FarMaxProjectedHeightPixels * (1.0 + TierHysteresis)
+			&& SnapshotStepPixels <= MediumMaxVisualStepPixels * (1.0 + TierHysteresis))
+		{
+			return EAlgonaPresentationInterpolationTier::Far;
+		}
+		break;
+	}
+
+	return ClassifyRaw(UnitPixels);
 }
 
-void AAlgonaArmyPresentationActor::ApplyInterpolatedTransforms(
-	double InterpolationAlpha)
+bool AAlgonaArmyPresentationActor::ShouldSnapInterpolation(
+	const FTransform& Previous,
+	const FTransform& Current) const
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(
-		AlgonaPresentation_InterpolateAndUpload);
+	return FVector::DistSquared(Previous.GetLocation(), Current.GetLocation())
+		> FMath::Square(TeleportDistance);
+}
 
-	if (PreviousTransforms.Num()
-			!= TargetTransforms.Num()
-		|| RenderTransforms.Num()
-			!= TargetTransforms.Num())
+bool AAlgonaArmyPresentationActor::RebuildInstances()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaPresentation_RebuildInstances);
+
+	if (!InstancedSkinnedMeshComponent)
 	{
-		bInterpolationActive = false;
+		return false;
+	}
+
+	InstancedSkinnedMeshComponent->ClearInstances();
+	InstanceIds.Reset();
+
+	if (CurrentTransforms.IsEmpty())
+	{
+		return true;
+	}
+
+	AnimationIndicesScratch.Init(AnimationIndex, CurrentTransforms.Num());
+
+	FBox WorkingSetBounds(EForceInit::ForceInit);
+	for (int32 Index = 0; Index < CurrentTransforms.Num(); ++Index)
+	{
+		WorkingSetBounds += CurrentTransforms[Index].GetLocation();
+		if (PreviousTransforms.IsValidIndex(Index))
+		{
+			WorkingSetBounds += PreviousTransforms[Index].GetLocation();
+		}
+	}
+
+	if (WorkingSetBounds.IsValid)
+	{
+		WorkingSetBounds = WorkingSetBounds.ExpandBy(FVector(5000.0, 5000.0, 5000.0));
+		InstancedSkinnedMeshComponent->SetPrimitiveBoundsOverride(WorkingSetBounds);
+	}
+
+	InstanceIds = InstancedSkinnedMeshComponent->AddInstances(
+		CurrentTransforms,
+		AnimationIndicesScratch,
+		true,
+		false);
+
+	const int32 CreatedCount = InstancedSkinnedMeshComponent->GetInstanceCount();
+	if (CreatedCount != CurrentTransforms.Num()
+		|| InstanceIds.Num() != CurrentTransforms.Num())
+	{
+		Fail(FString::Printf(
+			TEXT("ISKM Presentation failed: created %d / %d instances, ids=%d"),
+			CreatedCount,
+			CurrentTransforms.Num(),
+			InstanceIds.Num()));
+		return false;
+	}
+
+	for (int32 Index = 0; Index < InstanceIds.Num(); ++Index)
+	{
+		if (!UploadInstanceGpuData(Index))
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool AAlgonaArmyPresentationActor::UploadSimulationStateToInstances()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaPresentation_UploadSimulationState);
+
+	if (!InstancedSkinnedMeshComponent
+		|| InstanceIds.Num() != CurrentTransforms.Num())
+	{
+		Fail(TEXT("ISKM Presentation failed: simulation/instance working-set mismatch"));
+		return false;
+	}
+
+	for (int32 Index = 0; Index < InstanceIds.Num(); ++Index)
+	{
+		if (!InstancedSkinnedMeshComponent->SetInstanceTransform(
+			InstanceIds[Index],
+			CurrentTransforms[Index],
+			false))
+		{
+			Fail(FString::Printf(
+				TEXT("ISKM Presentation failed: SetInstanceTransform failed at %d"),
+				Index));
+			return false;
+		}
+
+		if (!UploadInstanceGpuData(Index))
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+bool AAlgonaArmyPresentationActor::UploadInstanceGpuData(int32 Index)
+{
+	if (!InstancedSkinnedMeshComponent
+		|| !InstanceIds.IsValidIndex(Index)
+		|| !PreviousTransforms.IsValidIndex(Index)
+		|| !CurrentTransforms.IsValidIndex(Index)
+		|| !InterpolationTiers.IsValidIndex(Index))
+	{
+		Fail(TEXT("ISKM Presentation failed: invalid GPU interpolation instance data"));
+		return false;
+	}
+
+	float Data[GpuInstanceCustomDataFloatCount] = {};
+
+	const FTransform& Previous = PreviousTransforms[Index];
+	const FTransform& Current = CurrentTransforms[Index];
+	const FVector PrevPosition = Previous.GetLocation();
+	const FQuat PrevRotation = Previous.GetRotation().GetNormalized();
+	const FVector PrevScale = Previous.GetScale3D();
+	const FVector CurrentPosition = Current.GetLocation();
+	const FQuat CurrentRotation = Current.GetRotation().GetNormalized();
+	const FVector CurrentScale = Current.GetScale3D();
+
+	Data[PrevPositionIndex + 0] = static_cast<float>(PrevPosition.X);
+	Data[PrevPositionIndex + 1] = static_cast<float>(PrevPosition.Y);
+	Data[PrevPositionIndex + 2] = static_cast<float>(PrevPosition.Z);
+	Data[PrevRotationIndex + 0] = static_cast<float>(PrevRotation.X);
+	Data[PrevRotationIndex + 1] = static_cast<float>(PrevRotation.Y);
+	Data[PrevRotationIndex + 2] = static_cast<float>(PrevRotation.Z);
+	Data[PrevRotationIndex + 3] = static_cast<float>(PrevRotation.W);
+	Data[PrevScaleIndex + 0] = static_cast<float>(PrevScale.X);
+	Data[PrevScaleIndex + 1] = static_cast<float>(PrevScale.Y);
+	Data[PrevScaleIndex + 2] = static_cast<float>(PrevScale.Z);
+
+	Data[CurrentPositionIndex + 0] = static_cast<float>(CurrentPosition.X);
+	Data[CurrentPositionIndex + 1] = static_cast<float>(CurrentPosition.Y);
+	Data[CurrentPositionIndex + 2] = static_cast<float>(CurrentPosition.Z);
+	Data[CurrentRotationIndex + 0] = static_cast<float>(CurrentRotation.X);
+	Data[CurrentRotationIndex + 1] = static_cast<float>(CurrentRotation.Y);
+	Data[CurrentRotationIndex + 2] = static_cast<float>(CurrentRotation.Z);
+	Data[CurrentRotationIndex + 3] = static_cast<float>(CurrentRotation.W);
+	Data[CurrentScaleIndex + 0] = static_cast<float>(CurrentScale.X);
+	Data[CurrentScaleIndex + 1] = static_cast<float>(CurrentScale.Y);
+	Data[CurrentScaleIndex + 2] = static_cast<float>(CurrentScale.Z);
+	Data[TierIndex] = static_cast<float>(static_cast<uint8>(InterpolationTiers[Index]));
+
+	if (!InstancedSkinnedMeshComponent->SetCustomData(
+		InstanceIds[Index],
+		TConstArrayView<float>(Data, GpuInstanceCustomDataFloatCount)))
+	{
+		Fail(FString::Printf(
+			TEXT("ISKM Presentation failed: SetCustomData failed at %d"),
+			Index));
+		return false;
+	}
+
+	return true;
+}
+
+void AAlgonaArmyPresentationActor::BeginBufferedInterpolation()
+{
+	NearInterpolationAlpha = 0.0f;
+	MediumInterpolationAlpha = 0.0f;
+	MediumFramesSinceAlphaUpdate = 0;
+	PushGpuInterpolationAlphas();
+}
+
+void AAlgonaArmyPresentationActor::CompleteBufferedInterpolation()
+{
+	NearInterpolationAlpha = 1.0f;
+	MediumInterpolationAlpha = 1.0f;
+	MediumFramesSinceAlphaUpdate = 0;
+	bInterpolationActive = false;
+	PushGpuInterpolationAlphas();
+}
+
+void AAlgonaArmyPresentationActor::UpdateGpuInterpolationAlphas(
+	double InterpolationAlpha,
+	float DeltaSeconds)
+{
+	const float Alpha = FMath::Clamp(
+		static_cast<float>(InterpolationAlpha),
+		0.0f,
+		1.0f);
+
+	bool bShouldPushGpuAlpha = false;
+
+	if (bHasNearInterpolationTier)
+	{
+		NearInterpolationAlpha = Alpha;
+		bShouldPushGpuAlpha = true;
+	}
+
+	if (bHasMediumInterpolationTier)
+	{
+		const double SafeDeltaSeconds =
+			FMath::Max(static_cast<double>(DeltaSeconds), 0.000001);
+		const double PixelsPerRenderFrame =
+			static_cast<double>(MaxMediumObservedSpeedCmPerSecond)
+			* SafeDeltaSeconds
+			* static_cast<double>(GroundPixelsPerWorldUnit);
+
+		if (MaxMediumObservedSpeedCmPerSecond > KINDA_SMALL_NUMBER
+			&& PixelsPerRenderFrame > UE_DOUBLE_SMALL_NUMBER)
+		{
+			MediumFrameCadence = FMath::Clamp(
+				FMath::FloorToInt(MediumMaxVisualStepPixels / PixelsPerRenderFrame),
+				1,
+				8);
+		}
+		else
+		{
+			MediumFrameCadence = 1;
+		}
+
+		++MediumFramesSinceAlphaUpdate;
+		if (MediumFramesSinceAlphaUpdate >= MediumFrameCadence)
+		{
+			MediumInterpolationAlpha = Alpha;
+			MediumFramesSinceAlphaUpdate = 0;
+			bShouldPushGpuAlpha = true;
+		}
+	}
+
+	// FAR advances only on authoritative 40 Hz snapshots. If the whole view
+	// is FAR there is no per-frame interpolation-alpha upload.
+	if (bShouldPushGpuAlpha)
+	{
+		PushGpuInterpolationAlphas();
+	}
+}
+
+void AAlgonaArmyPresentationActor::PushGpuInterpolationAlphas()
+{
+	if (!InstancedSkinnedMeshComponent)
+	{
 		return;
 	}
 
-	const float Alpha =
-		FMath::Clamp(
-			static_cast<float>(InterpolationAlpha),
-			0.0f,
-			1.0f);
-
-	for (int32 Index = 0;
-		Index < TargetTransforms.Num();
-		++Index)
+	float AlphaData[2] =
 	{
-		const FVector Location =
-			FMath::Lerp(
-				PreviousTransforms[Index]
-					.GetLocation(),
-				TargetTransforms[Index]
-					.GetLocation(),
-				Alpha);
+		NearInterpolationAlpha,
+		MediumInterpolationAlpha
+	};
 
-		const FQuat Rotation =
-			FQuat::Slerp(
-				PreviousTransforms[Index]
-					.GetRotation(),
-				TargetTransforms[Index]
-					.GetRotation(),
-				Alpha)
-			.GetNormalized();
+	InstancedSkinnedMeshComponent->SetCustomPrimitiveDataFloatArray(
+		NearAlphaPrimitiveDataIndex,
+		TConstArrayView<float>(AlphaData, UE_ARRAY_COUNT(AlphaData)));
+}
 
-		RenderTransforms[Index] =
-			FTransform(
-				Rotation,
-				Location,
-				TargetTransforms[Index]
-					.GetScale3D());
+void AAlgonaArmyPresentationActor::RefreshInterpolationTierPresence()
+{
+	bHasNearInterpolationTier = false;
+	bHasMediumInterpolationTier = false;
+	MaxMediumObservedSpeedCmPerSecond = 0.0f;
+
+	for (int32 Index = 0; Index < InterpolationTiers.Num(); ++Index)
+	{
+		const EAlgonaPresentationInterpolationTier Tier = InterpolationTiers[Index];
+
+		if (Tier == EAlgonaPresentationInterpolationTier::Near)
+		{
+			bHasNearInterpolationTier = true;
+		}
+		else if (Tier == EAlgonaPresentationInterpolationTier::Medium)
+		{
+			bHasMediumInterpolationTier = true;
+			if (ObservedLinearSpeedsCmPerSecond.IsValidIndex(Index))
+			{
+				MaxMediumObservedSpeedCmPerSecond = FMath::Max(
+					MaxMediumObservedSpeedCmPerSecond,
+					ObservedLinearSpeedsCmPerSecond[Index]);
+			}
+		}
+	}
+}
+
+void AAlgonaArmyPresentationActor::Fail(const FString& Message)
+{
+	bRendererFailed = true;
+	SetActorTickEnabled(false);
+
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(49001, 30.0f, FColor::Red, Message);
 	}
 
-	if (!RenderTransforms.IsEmpty())
+	UE_LOG(LogAlgonaPresentation, Error, TEXT("%s"), *Message);
+}
+
+void AAlgonaArmyPresentationActor::Succeed(const FString& Message)
+{
+	if (GEngine)
 	{
-		InstancedMeshComponent
-			->BatchUpdateInstancesTransforms(
-				0,
-				RenderTransforms,
-				true,
-				true,
-				true);
+		GEngine->AddOnScreenDebugMessage(49001, 10.0f, FColor::Green, Message);
 	}
+
+	UE_LOG(LogAlgonaPresentation, Display, TEXT("%s"), *Message);
 }

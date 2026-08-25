@@ -1,4 +1,4 @@
-﻿#include "Core/AlgonaSimulationSubsystem.h"
+#include "Core/AlgonaSimulationSubsystem.h"
 
 #include "Army/AlgonaSoldierFragments.h"
 
@@ -14,8 +14,7 @@
 
 namespace
 {
-	// Эти значения читаются при старте мира.
-	// После изменения нужно перезапустить PIE.
+	// Read when a world starts. Restart PIE after changing these values.
 	TAutoConsoleVariable<int32> CVarAlgonaP0SoldierCount(
 		TEXT("algona.P0.SoldierCount"),
 		AlgonaSimulationDefaults::SoldierCount,
@@ -46,8 +45,8 @@ bool UAlgonaSimulationSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 		World->WorldType == EWorldType::Game
 		|| World->WorldType == EWorldType::PIE;
 
-	// Simulation работает в одиночной игре и на сервере,
-	// но не создаётся на обычном сетевом клиенте.
+	// Simulation runs in standalone and on the authoritative server, not on
+	// ordinary network clients.
 	return bPlayableWorld && World->GetNetMode() != NM_Client;
 }
 
@@ -56,10 +55,8 @@ void UAlgonaSimulationSubsystem::Initialize(
 {
 	Super::Initialize(Collection);
 
-	// Явно получаем Mass-системы, без которых наша Simulation не работает.
 	MassEntitySubsystem =
 		Collection.InitializeDependency<UMassEntitySubsystem>();
-
 	MassSpawnerSubsystem =
 		Collection.InitializeDependency<UMassSpawnerSubsystem>();
 
@@ -75,13 +72,10 @@ void UAlgonaSimulationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	(void)InWorld;
 
 	FixedStepAccumulator.Reset();
-
 	SimulationTick = 0;
 	StateRevision = 0;
 	Metrics = FAlgonaSimulationMetrics();
 
-	// ShouldCreateSubsystem уже отсеивает обычные клиенты.
-	// Эта проверка остаётся как дополнительная защита.
 	if (!IsAuthoritativeSimulationWorld())
 	{
 		return;
@@ -104,20 +98,16 @@ void UAlgonaSimulationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		1,
 		1000);
 
-	if (!CreateSoldiers(
-		SoldierCount,
-		SquadSize))
+	if (!CreateSoldiers(SoldierCount, SquadSize))
 	{
 		DestroySoldiers();
 		return;
 	}
 
-	// Сообщает Presentation, что появился первый полный набор солдат.
+	// First complete authoritative state is now available to Presentation.
 	++StateRevision;
 
-	Metrics.StartupState =
-		EAlgonaSimulationStartupState::Ready;
-
+	Metrics.StartupState = EAlgonaSimulationStartupState::Ready;
 	Metrics.EntityCount = SoldierEntities.Num();
 	Metrics.SquadCount = Squads.Num();
 }
@@ -127,13 +117,11 @@ void UAlgonaSimulationSubsystem::Deinitialize()
 	SoldierUpdateQuery.Reset();
 	SoldierSnapshotQuery.Reset();
 
-	/*
-	 * При teardown мира Mass уже сам уничтожает своё состояние.
-	 * Здесь больше не вызываем DestroySoldiers(), потому что
-	 * EntityManager к этому моменту уже может быть deinitialized.
-	 */
+	// During world teardown Mass can already be deinitialized, so do not call
+	// DestroySoldiers() here. The world owns and tears down the entity manager.
 	SoldierEntities.Reset();
 	Squads.Reset();
+	PendingMoveCommands.Reset();
 	SoldierEntityConfig = nullptr;
 
 	Metrics.EntityCount = 0;
@@ -141,7 +129,6 @@ void UAlgonaSimulationSubsystem::Deinitialize()
 
 	MassSpawnerSubsystem = nullptr;
 	MassEntitySubsystem = nullptr;
-
 	FixedStepAccumulator.Reset();
 
 	Super::Deinitialize();
@@ -149,8 +136,7 @@ void UAlgonaSimulationSubsystem::Deinitialize()
 
 void UAlgonaSimulationSubsystem::Tick(float DeltaTime)
 {
-	if (Metrics.StartupState
-			!= EAlgonaSimulationStartupState::Ready
+	if (Metrics.StartupState != EAlgonaSimulationStartupState::Ready
 		|| !IsAuthoritativeSimulationWorld()
 		|| !MassEntitySubsystem
 		|| SoldierEntities.IsEmpty())
@@ -163,13 +149,10 @@ void UAlgonaSimulationSubsystem::Tick(float DeltaTime)
 			static_cast<double>(DeltaTime),
 			[this](double StepSeconds)
 			{
-				RunSimulationStep(
-					static_cast<float>(StepSeconds));
+				RunSimulationStep(static_cast<float>(StepSeconds));
 			});
 
-	Metrics.BacklogSeconds =
-		FixedStepAccumulator.GetBacklogSeconds();
-
+	Metrics.BacklogSeconds = FixedStepAccumulator.GetBacklogSeconds();
 	Metrics.OverloadedFrameCount =
 		FixedStepAccumulator.GetOverloadedFrameCount();
 }
@@ -181,21 +164,15 @@ TStatId UAlgonaSimulationSubsystem::GetStatId() const
 		STATGROUP_Tickables);
 }
 
-FAlgonaSimulationMetrics
-UAlgonaSimulationSubsystem::GetSimulationMetrics() const
+FAlgonaSimulationMetrics UAlgonaSimulationSubsystem::GetSimulationMetrics() const
 {
 	FAlgonaSimulationMetrics Snapshot = Metrics;
-
 	Snapshot.SimulationTick = SimulationTick;
 	Snapshot.EntityCount = SoldierEntities.Num();
 	Snapshot.SquadCount = Squads.Num();
-
-	Snapshot.BacklogSeconds =
-		FixedStepAccumulator.GetBacklogSeconds();
-
+	Snapshot.BacklogSeconds = FixedStepAccumulator.GetBacklogSeconds();
 	Snapshot.OverloadedFrameCount =
 		FixedStepAccumulator.GetOverloadedFrameCount();
-
 	return Snapshot;
 }
 
@@ -203,8 +180,7 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshots(
 	TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
 	int32 MaxEntities)
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(
-		AlgonaSimulation_ExportSnapshots);
+	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_ExportSnapshots);
 
 	OutSnapshots.Reset();
 
@@ -228,19 +204,15 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshots(
 
 	FMassEntityManager& EntityManager =
 		MassEntitySubsystem->GetMutableEntityManager();
-
 	FMassExecutionContext ExecutionContext =
 		EntityManager.CreateExecutionContext(0.0f);
 
 	SoldierSnapshotQuery->ForEachEntityChunk(
 		ExecutionContext,
-		[&OutSnapshots, SafeMaxEntities](
-			FMassExecutionContext& Context)
+		[&OutSnapshots, SafeMaxEntities](FMassExecutionContext& Context)
 		{
 			const TConstArrayView<FAlgonaSoldierIdFragment> Ids =
-				Context.GetFragmentView<
-					FAlgonaSoldierIdFragment>();
-
+				Context.GetFragmentView<FAlgonaSoldierIdFragment>();
 			const TConstArrayView<FTransformFragment> Transforms =
 				Context.GetFragmentView<FTransformFragment>();
 
@@ -254,7 +226,6 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshots(
 
 				FAlgonaSoldierSnapshot& Snapshot =
 					OutSnapshots.AddDefaulted_GetRef();
-
 				Snapshot.EntityId = Ids[Index].Value;
 				Snapshot.Position = Transform.GetLocation();
 				Snapshot.Facing = Transform.GetRotation();
@@ -279,7 +250,6 @@ bool UAlgonaSimulationSubsystem::SubmitMoveSquadCommand(
 		PendingMoveCommands.AddDefaulted_GetRef();
 	Command.SquadId = SquadId;
 	Command.TargetLocation = TargetLocation;
-
 	return true;
 }
 
@@ -311,47 +281,29 @@ void UAlgonaSimulationSubsystem::InitializeQueries()
 	FMassEntityManager& EntityManager =
 		MassEntitySubsystem->GetMutableEntityManager();
 
-	// P0 проходит по игровому состоянию каждого солдата.
 	SoldierUpdateQuery =
-		MakeUnique<FMassEntityQuery>(
-			EntityManager.AsShared());
-	
+		MakeUnique<FMassEntityQuery>(EntityManager.AsShared());
 	SoldierUpdateQuery->AddRequirement<FTransformFragment>(
 		EMassFragmentAccess::ReadWrite);
-	
 	SoldierUpdateQuery->AddRequirement<FAlgonaSquadMemberFragment>(
 		EMassFragmentAccess::ReadOnly);
-	
-	SoldierUpdateQuery
-		->AddRequirement<FAlgonaSoldierMovementFragment>(
-			EMassFragmentAccess::ReadWrite);
+	SoldierUpdateQuery->AddRequirement<FAlgonaSoldierMovementFragment>(
+		EMassFragmentAccess::ReadWrite);
+	SoldierUpdateQuery->AddTagRequirement<FAlgonaSoldierTag>(
+		EMassFragmentPresence::All);
 
-	SoldierUpdateQuery
-		->AddTagRequirement<FAlgonaSoldierTag>(
-			EMassFragmentPresence::All);
-
-	// Этот запрос отдаёт Presentation только ID и положение солдата.
 	SoldierSnapshotQuery =
-		MakeUnique<FMassEntityQuery>(
-			EntityManager.AsShared());
-
-	SoldierSnapshotQuery
-		->AddRequirement<FAlgonaSoldierIdFragment>(
-			EMassFragmentAccess::ReadOnly);
-
-	SoldierSnapshotQuery
-		->AddRequirement<FTransformFragment>(
-			EMassFragmentAccess::ReadOnly);
-
-	SoldierSnapshotQuery
-		->AddTagRequirement<FAlgonaSoldierTag>(
-			EMassFragmentPresence::All);
+		MakeUnique<FMassEntityQuery>(EntityManager.AsShared());
+	SoldierSnapshotQuery->AddRequirement<FAlgonaSoldierIdFragment>(
+		EMassFragmentAccess::ReadOnly);
+	SoldierSnapshotQuery->AddRequirement<FTransformFragment>(
+		EMassFragmentAccess::ReadOnly);
+	SoldierSnapshotQuery->AddTagRequirement<FAlgonaSoldierTag>(
+		EMassFragmentPresence::All);
 }
 
 bool UAlgonaSimulationSubsystem::IsAuthoritativeSimulationWorld() const
 {
 	const UWorld* World = GetWorld();
-
-	return World
-		&& World->GetNetMode() != NM_Client;
+	return World && World->GetNetMode() != NM_Client;
 }

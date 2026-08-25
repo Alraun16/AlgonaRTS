@@ -1,16 +1,15 @@
 #include "Presentation/AlgonaPresentationSubsystem.h"
 
-#include "Debug/AlgonaP1TestCameraActor.h"
+#include "Camera/AlgonaRTSCameraActor.h"
 #include "Presentation/AlgonaArmyPresentationActor.h"
-#include "Presentation/AlgonaArmySkinnedPresentationActor.h"
+#include "Presentation/AlgonaLegacyIsmPresentationActor.h"
+#include "Presentation/AlgonaPresentationSettings.h"
 
 #include "Engine/GameViewportClient.h"
-
-#include "AlgonaP0PresentationExperiment.h"
+#include "Engine/Engine.h"
 #include "Engine/World.h"
 
-bool UAlgonaPresentationSubsystem::ShouldCreateSubsystem(
-	UObject* Outer) const
+bool UAlgonaPresentationSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 {
 	if (!Super::ShouldCreateSubsystem(Outer))
 	{
@@ -18,7 +17,6 @@ bool UAlgonaPresentationSubsystem::ShouldCreateSubsystem(
 	}
 
 	const UWorld* World = Cast<UWorld>(Outer);
-
 	if (!World)
 	{
 		return false;
@@ -28,160 +26,127 @@ bool UAlgonaPresentationSubsystem::ShouldCreateSubsystem(
 		World->WorldType == EWorldType::Game
 		|| World->WorldType == EWorldType::PIE;
 
-	return bPlayableWorld
-		&& World->GetNetMode() != NM_DedicatedServer;
+	return bPlayableWorld && World->GetNetMode() != NM_DedicatedServer;
 }
 
-void UAlgonaPresentationSubsystem::OnWorldBeginPlay(
-	UWorld& InWorld)
+void UAlgonaPresentationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
 	Super::OnWorldBeginPlay(InWorld);
 	
-	/*
-	 * Базовые performance stats, которые всегда показываем
-	 * в игровом viewport.
-	 */
-	if (UGameViewportClient* GameViewport =
-		InWorld.GetGameViewport())
+	if (GEngine)
+	{
+		GEngine->SetMaxFPS(165.0f);
+	}
+	
+	// Keep the two basic benchmark overlays enabled in normal Editor and
+	// Development runs. Shipping may suppress engine stats independently.
+	if (UGameViewportClient* GameViewport = InWorld.GetGameViewport())
 	{
 		TArray<FString> EnabledStats;
-
-		if (const TArray<FString>* CurrentStats =
-			GameViewport->GetEnabledStats())
+		if (const TArray<FString>* CurrentStats = GameViewport->GetEnabledStats())
 		{
 			EnabledStats = *CurrentStats;
 		}
 
 		EnabledStats.AddUnique(TEXT("FPS"));
 		EnabledStats.AddUnique(TEXT("Unit"));
-
 		GameViewport->SetEnabledStats(EnabledStats);
 	}
-	
-	if (PresentationActor || SkinnedPresentationActor)
+
+	if (ArmyPresentationActor || LegacyPresentationActor || CameraActor)
 	{
 		return;
 	}
 
-	const EAlgonaP0PresentationBackend Backend =
-		GetAlgonaP0PresentationBackend();
+	const EAlgonaP1PresentationMode PresentationMode =
+		GetAlgonaP1PresentationMode();
 
-	const bool bUseStaticIsmBackend =
-		Backend == EAlgonaP0PresentationBackend::IsmCandidate;
-
-	const bool bUseSkinnedIsmBackend =
-		Backend
-			== EAlgonaP0PresentationBackend::InstancedSkinnedMeshCandidate;
-
-	if (!bUseStaticIsmBackend && !bUseSkinnedIsmBackend)
+	if (PresentationMode == EAlgonaP1PresentationMode::SimulationOnly)
 	{
 		return;
 	}
 
 	FActorSpawnParameters CameraSpawnParameters;
-
-	CameraSpawnParameters.Name =
-		TEXT("AlgonaP1TestCamera");
-
-	CameraSpawnParameters.ObjectFlags |=
-		RF_Transient;
-
+	CameraSpawnParameters.Name = TEXT("AlgonaRTSCamera");
+	CameraSpawnParameters.ObjectFlags |= RF_Transient;
 	CameraSpawnParameters.SpawnCollisionHandlingOverride =
 		ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	AAlgonaP1TestCameraActor* CameraActor =
-		InWorld.SpawnActor<AAlgonaP1TestCameraActor>(
-			FVector::ZeroVector,
-			FRotator::ZeroRotator,
-			CameraSpawnParameters);
+	CameraActor = InWorld.SpawnActor<AAlgonaRTSCameraActor>(
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		CameraSpawnParameters);
 
 	if (!CameraActor)
 	{
 		return;
 	}
 
-	TestCameraActor = CameraActor;
-
 	FActorSpawnParameters PresentationSpawnParameters;
-
-	PresentationSpawnParameters.ObjectFlags |=
-		RF_Transient;
-
+	PresentationSpawnParameters.ObjectFlags |= RF_Transient;
 	PresentationSpawnParameters.SpawnCollisionHandlingOverride =
 		ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	if (bUseStaticIsmBackend)
+	if (PresentationMode == EAlgonaP1PresentationMode::LegacyStaticIsm)
 	{
-		PresentationSpawnParameters.Name =
-			TEXT("AlgonaArmyPresentation");
-
-		PresentationActor =
-			InWorld.SpawnActor<AAlgonaArmyPresentationActor>(
+		PresentationSpawnParameters.Name = TEXT("AlgonaLegacyIsmPresentation");
+		LegacyPresentationActor =
+			InWorld.SpawnActor<AAlgonaLegacyIsmPresentationActor>(
 				FVector::ZeroVector,
 				FRotator::ZeroRotator,
 				PresentationSpawnParameters);
 
-		if (!PresentationActor)
+		if (!LegacyPresentationActor)
 		{
 			CameraActor->Destroy();
-			TestCameraActor = nullptr;
+			CameraActor = nullptr;
 			return;
 		}
 
-		PresentationActor->SetPresentationCamera(
+		LegacyPresentationActor->SetPresentationCamera(
 			CameraActor->GetCameraComponent());
-
-		PresentationActor->AddTickPrerequisiteActor(
-			CameraActor);
-
+		LegacyPresentationActor->AddTickPrerequisiteActor(CameraActor);
 		return;
 	}
 
-	PresentationSpawnParameters.Name =
-		TEXT("AlgonaArmySkinnedPresentation");
-
-	SkinnedPresentationActor =
-		InWorld.SpawnActor<AAlgonaArmySkinnedPresentationActor>(
+	PresentationSpawnParameters.Name = TEXT("AlgonaArmyPresentation");
+	ArmyPresentationActor =
+		InWorld.SpawnActor<AAlgonaArmyPresentationActor>(
 			FVector::ZeroVector,
 			FRotator::ZeroRotator,
 			PresentationSpawnParameters);
 
-	if (!SkinnedPresentationActor)
+	if (!ArmyPresentationActor)
 	{
 		CameraActor->Destroy();
-		TestCameraActor = nullptr;
+		CameraActor = nullptr;
 		return;
 	}
 
-	SkinnedPresentationActor->SetPresentationCamera(
+	ArmyPresentationActor->SetPresentationCamera(
 		CameraActor->GetCameraComponent());
-
-	SkinnedPresentationActor->AddTickPrerequisiteActor(
-		CameraActor);
+	ArmyPresentationActor->AddTickPrerequisiteActor(CameraActor);
 }
 
 void UAlgonaPresentationSubsystem::Deinitialize()
 {
-	if (IsValid(PresentationActor))
+	if (IsValid(ArmyPresentationActor))
 	{
-		PresentationActor->Destroy();
+		ArmyPresentationActor->Destroy();
 	}
+	ArmyPresentationActor = nullptr;
 
-	PresentationActor = nullptr;
-
-	if (IsValid(SkinnedPresentationActor))
+	if (IsValid(LegacyPresentationActor))
 	{
-		SkinnedPresentationActor->Destroy();
+		LegacyPresentationActor->Destroy();
 	}
+	LegacyPresentationActor = nullptr;
 
-	SkinnedPresentationActor = nullptr;
-
-	if (IsValid(TestCameraActor))
+	if (IsValid(CameraActor))
 	{
-		TestCameraActor->Destroy();
+		CameraActor->Destroy();
 	}
-
-	TestCameraActor = nullptr;
+	CameraActor = nullptr;
 
 	Super::Deinitialize();
 }

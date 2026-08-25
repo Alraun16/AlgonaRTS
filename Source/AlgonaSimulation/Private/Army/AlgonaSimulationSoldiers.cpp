@@ -1,11 +1,8 @@
-﻿#include "Core/AlgonaSimulationSubsystem.h"
+#include "Core/AlgonaSimulationSubsystem.h"
 
-#include "AlgonaP0PresentationExperiment.h"
 #include "Army/AlgonaSoldierFragments.h"
 #include "Army/AlgonaSoldierTrait.h"
 
-#include "Components/InstancedStaticMeshComponent.h"
-#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "Mass/EntityFragments.h"
 #include "MassEntityConfigAsset.h"
@@ -13,11 +10,7 @@
 #include "MassEntitySubsystem.h"
 #include "MassEntityTemplate.h"
 #include "MassEntityView.h"
-#include "MassLODTypes.h"
-#include "MassLODTrait.h"
-#include "MassRepresentationTypes.h"
 #include "MassSpawnerSubsystem.h"
-#include "MassStationaryVisualizationTrait.h"
 
 bool UAlgonaSimulationSubsystem::CreateSoldiers(
 	int32 SoldierCount,
@@ -54,100 +47,15 @@ bool UAlgonaSimulationSubsystem::CreateSoldiers(
 		SoldierEntityConfig->GetMutableConfig();
 	SoldierConfig.AddTrait(*SoldierTrait);
 
-	if (GetAlgonaP0PresentationBackend()
-		== EAlgonaP0PresentationBackend::LegacyMassStationary)
-	{
-		UStaticMesh* SoldierMesh = LoadObject<UStaticMesh>(
-			nullptr,
-			TEXT("/Game/Archer.Archer"));
-
-		UMassStationaryVisualizationTrait* VisualizationTrait =
-			NewObject<UMassStationaryVisualizationTrait>(
-				SoldierEntityConfig);
-
-		UMassLODCollectorTrait* LODCollectorTrait =
-			NewObject<UMassLODCollectorTrait>(
-				SoldierEntityConfig);
-
-		if (!SoldierMesh
-			|| !VisualizationTrait
-			|| !LODCollectorTrait)
-		{
-			Metrics.StartupState =
-				EAlgonaSimulationStartupState::SoldierTemplateBuildFailed;
-			return false;
-		}
-
-		VisualizationTrait->StaticMeshInstanceDesc.Reset();
-		
-		VisualizationTrait->StaticMeshInstanceDesc.bUseTransformOffset = true;
-		VisualizationTrait->StaticMeshInstanceDesc.TransformOffset =
-			FTransform(FRotator(0.0f, -90.0f, 0.0f));
-		
-		FMassStaticMeshInstanceVisualizationMeshDesc& MeshDesc =
-			VisualizationTrait
-				->StaticMeshInstanceDesc
-				.Meshes
-				.AddDefaulted_GetRef();
-
-		MeshDesc.Mesh = SoldierMesh;
-		MeshDesc.ISMComponentClass =
-			UInstancedStaticMeshComponent::StaticClass();
-		MeshDesc.Mobility = EComponentMobility::Movable;
-		MeshDesc.bCastShadows = false;
-		MeshDesc.SetSignificanceRange(
-			EMassLOD::High,
-			EMassLOD::Off);
-
-		VisualizationTrait->Params.LODRepresentation[EMassLOD::High] =
-			EMassRepresentationType::StaticMeshInstance;
-		VisualizationTrait->Params.LODRepresentation[EMassLOD::Medium] =
-			EMassRepresentationType::StaticMeshInstance;
-		VisualizationTrait->Params.LODRepresentation[EMassLOD::Low] =
-			EMassRepresentationType::StaticMeshInstance;
-		VisualizationTrait->Params.LODRepresentation[EMassLOD::Off] =
-			EMassRepresentationType::None;
-
-		VisualizationTrait->LODParams.BaseLODDistance[EMassLOD::High] =
-			0.0f;
-		VisualizationTrait->LODParams.BaseLODDistance[EMassLOD::Medium] =
-			10000.0f;
-		VisualizationTrait->LODParams.BaseLODDistance[EMassLOD::Low] =
-			30000.0f;
-		VisualizationTrait->LODParams.BaseLODDistance[EMassLOD::Off] =
-			1000000.0f;
-
-		VisualizationTrait->LODParams.VisibleLODDistance[
-			EMassLOD::High] = 0.0f;
-		VisualizationTrait->LODParams.VisibleLODDistance[
-			EMassLOD::Medium] = 10000.0f;
-		VisualizationTrait->LODParams.VisibleLODDistance[
-			EMassLOD::Low] = 30000.0f;
-		VisualizationTrait->LODParams.VisibleLODDistance[
-			EMassLOD::Off] = 1000000.0f;
-
-		VisualizationTrait->LODParams.LODMaxCount[EMassLOD::High] =
-			SoldierCount;
-		VisualizationTrait->LODParams.LODMaxCount[EMassLOD::Medium] =
-			SoldierCount;
-		VisualizationTrait->LODParams.LODMaxCount[EMassLOD::Low] =
-			SoldierCount;
-		VisualizationTrait->LODParams.LODMaxCount[EMassLOD::Off] =
-			SoldierCount;
-
-		VisualizationTrait->Params.ComputeCachedValues();
-
-		SoldierConfig.AddTrait(*VisualizationTrait);
-		SoldierConfig.AddTrait(*LODCollectorTrait);
-	}
-
+	// Simulation creates only authoritative entity state. Presentation chooses
+	// its renderer independently and never adds renderer fragments here.
 	const FMassEntityTemplate& SoldierTemplate =
 		SoldierEntityConfig->GetOrCreateEntityTemplate(*World);
 
 	SoldierEntities.Reset();
 	SoldierEntities.Reserve(SoldierCount);
 
-	// Не завершаем создание entities, пока не заполним их стартовые данные ниже.
+	// Keep the creation context alive until initial fragment data is filled.
 	const TSharedPtr<FMassEntityManager::FEntityCreationContext>
 		CreationContext = MassSpawnerSubsystem->SpawnEntities(
 			SoldierTemplate,
@@ -186,6 +94,7 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 
 	constexpr int32 SquadsPerRow = 20;
 	constexpr float SpaceBetweenSquads = 600.0f;
+	constexpr float SoldierSpacing = 100.0f;
 
 	const int32 FormationWidth = FMath::Min(
 		10,
@@ -194,7 +103,6 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 		RequestedSquadSize,
 		FormationWidth);
 
-	const float SoldierSpacing = 100.0f;
 	const float FormationWorldDepth =
 		static_cast<float>(FormationDepth - 1) * SoldierSpacing;
 	const float FormationWorldWidth =
@@ -236,7 +144,6 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 			static_cast<double>(SquadY) * SquadSpacingY
 				+ FormationWorldWidth * 0.5,
 			0.0);
-		
 		Squad.TargetAnchorLocation = Squad.AnchorLocation;
 
 		for (int32 SlotIndex = 0;
@@ -256,38 +163,28 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 				return false;
 			}
 
-			FMassEntityView EntityView(
-				EntityManager,
-				SoldierEntity);
+			FMassEntityView EntityView(EntityManager, SoldierEntity);
 
 			FAlgonaSoldierIdFragment& Id =
-				EntityView.GetFragmentData<
-					FAlgonaSoldierIdFragment>();
+				EntityView.GetFragmentData<FAlgonaSoldierIdFragment>();
 			Id.Value = static_cast<uint32>(SoldierIndex + 1);
 
 			FAlgonaSquadMemberFragment& Member =
-				EntityView.GetFragmentData<
-					FAlgonaSquadMemberFragment>();
+				EntityView.GetFragmentData<FAlgonaSquadMemberFragment>();
 			Member.SquadId = Squad.SquadId;
 			Member.SlotIndex = SlotIndex;
 
 			FAlgonaSoldierMovementFragment& Movement =
-				EntityView.GetFragmentData<
-					FAlgonaSoldierMovementFragment>();
+				EntityView.GetFragmentData<FAlgonaSoldierMovementFragment>();
 			Movement.Velocity = FVector::ZeroVector;
 			Movement.LastProcessedSimulationTick = 0;
 			Movement.State = EAlgonaSoldierMovementState::Idle;
 
 			FTransform InitialTransform = FTransform::Identity;
 			InitialTransform.SetLocation(
-				ComputeSlotWorldPosition(
-					Squad,
-					SlotIndex));
+				ComputeSlotWorldPosition(Squad, SlotIndex));
 			InitialTransform.SetRotation(
-				Squad
-					.FacingDirection
-					.Rotation()
-					.Quaternion());
+				Squad.FacingDirection.Rotation().Quaternion());
 
 			FTransformFragment& Transform =
 				EntityView.GetFragmentData<FTransformFragment>();
@@ -318,7 +215,6 @@ void UAlgonaSimulationSubsystem::DestroySoldiers()
 
 	Metrics.EntityCount = 0;
 	Metrics.SquadCount = 0;
-
 }
 
 FVector UAlgonaSimulationSubsystem::ComputeSlotWorldPosition(

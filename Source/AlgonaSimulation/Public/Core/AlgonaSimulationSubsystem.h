@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "AlgonaFixedStepAccumulator.h"
 #include "AlgonaSimulationStatus.h"
@@ -24,7 +24,7 @@ namespace AlgonaSimulationDefaults
 	inline constexpr int32 SquadSize = 50;
 }
 
-/** Приказ, который будет применён в начале следующего fixed-step. */
+/** Command consumed at the beginning of the next authoritative fixed step. */
 struct FAlgonaSquadMoveCommand
 {
 	int32 SquadId = INDEX_NONE;
@@ -32,9 +32,9 @@ struct FAlgonaSquadMoveCommand
 };
 
 /**
- * Главная Simulation-система текущего мира.
- * На обычном сетевом клиенте не создаётся.
- * Все игровые обновления выполняются через фиксированные simulation steps.
+ * World-scoped authoritative Simulation Core.
+ * It exists in standalone/server worlds, never depends on Presentation, and
+ * updates gameplay state only through fixed simulation steps.
  */
 UCLASS()
 class ALGONASIMULATION_API UAlgonaSimulationSubsystem final
@@ -64,12 +64,12 @@ public:
 	{
 		return FixedStepAccumulator.GetFixedStepSeconds();
 	}
-	
+
 	double GetInterpolationAlpha() const
 	{
 		return FixedStepAccumulator.GetInterpolationAlpha();
 	}
-	
+
 	int32 GetSoldierCount() const
 	{
 		return SoldierEntities.Num();
@@ -82,22 +82,16 @@ public:
 
 	FAlgonaSimulationMetrics GetSimulationMetrics() const;
 
-	/**
-	 * Копирует минимальные данные солдат для Presentation:
-	 * ID, позицию и направление.
-	 * Внутренние Mass handles и данные renderer наружу не передаются.
-	 */
+	/** Exports only renderer-neutral ID/position/facing snapshots. */
 	int32 ExportSoldierSnapshots(
 		TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
 		int32 MaxEntities);
-	
-	// Приказ "простейшее движение"
-	bool SubmitMoveSquadCommand(
-	int32 SquadId,
-	const FVector& TargetLocation);
 
-	int32 SubmitMoveAllSquadsByOffset(
-		const FVector& Offset);
+	bool SubmitMoveSquadCommand(
+		int32 SquadId,
+		const FVector& TargetLocation);
+
+	int32 SubmitMoveAllSquadsByOffset(const FVector& Offset);
 
 private:
 	void InitializeQueries();
@@ -105,9 +99,7 @@ private:
 	bool CreateSoldiers(
 		int32 SoldierCount,
 		int32 RequestedSquadSize);
-
 	bool CreateSquads(int32 RequestedSquadSize);
-
 	void DestroySoldiers();
 
 	void RunSimulationStep(float DeltaTime);
@@ -129,7 +121,6 @@ private:
 
 	uint64 SimulationTick = 0;
 	uint64 StateRevision = 0;
-
 	FAlgonaSimulationMetrics Metrics;
 
 	UPROPERTY(Transient)

@@ -1,10 +1,11 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 
 /**
- * Минимальные данные солдата, которые Simulation отдаёт Presentation.
- * Здесь нет Mass handles, ISM index, материалов, LOD и другой визуальной информации.
+ * Minimal renderer-neutral state exported from Simulation to Presentation.
+ * No Mass handle, renderer index, material, LOD or representation data leaks
+ * across this boundary.
  */
 struct ALGONASIMULATION_API FAlgonaSoldierSnapshot
 {

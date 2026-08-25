@@ -1,10 +1,11 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 
 /**
- * Данные одного RTS-отряда.
- * Список солдат отдельно здесь не храним: каждый солдат сам знает свой SquadId.
+ * Authoritative state of one RTS squad.
+ * Soldiers store their SquadId and SlotIndex in Mass fragments; the squad does
+ * not duplicate a list of entity handles.
  */
 struct ALGONASIMULATION_API FAlgonaSquad
 {
@@ -16,16 +17,16 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	int32 SquadId = INDEX_NONE;
 	int32 MemberCount = 0;
 
-	// 100 солдат на отряд дают примерно 200 отрядов при 20 000 солдатах.
 	int32 FormationWidth = 10;
 	int32 FormationDepth = 5;
 	float SoldierSpacing = 80.0f;
 
-	// Опорная точка передней части строя.
+	// Anchor is the front-center reference point of the formation.
 	FVector AnchorLocation = FVector::ZeroVector;
 	FVector TargetAnchorLocation = FVector::ZeroVector;
 	FVector FacingDirection = FVector::ForwardVector;
 
+	// P1 debug movement values. Gameplay data will replace these later.
 	float AnchorMoveSpeed = 300.0f;
 	float SoldierMoveSpeed = 450.0f;
 	bool bHasMoveTarget = false;

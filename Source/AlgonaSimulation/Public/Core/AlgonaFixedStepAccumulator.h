@@ -1,12 +1,11 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 
 /**
- * Превращает переменный frame DeltaTime в фиксированные simulation steps.
- *
- * За один frame выполняется ограниченное число steps. Оставшийся долг
- * сохраняется: clock не выбрасывает authoritative simulation ticks молча.
+ * Converts variable frame time into deterministic fixed simulation steps.
+ * Work per frame is capped, but authoritative simulation time is never
+ * silently discarded: any remaining debt stays in the accumulator.
  */
 struct ALGONASIMULATION_API FAlgonaFixedStepAccumulator
 {
@@ -33,58 +32,57 @@ struct ALGONASIMULATION_API FAlgonaFixedStepAccumulator
 		OverloadedFrameCount = 0;
 	}
 
-template <typename TStepFunction>
-int32 Advance(
-	double FrameDeltaSeconds,
-	TStepFunction&& ExecuteStep)
-{
-	AccumulatorSeconds +=
-		FMath::Max(FrameDeltaSeconds, 0.0);
-
-	MaxObservedBacklogSeconds = FMath::Max(
-		MaxObservedBacklogSeconds,
-		AccumulatorSeconds);
-
-	// Небольшой допуск только против погрешности double.
-	const double StepToleranceSeconds =
-		FixedStepSeconds * 1.0e-9;
-
-	int32 ExecutedSteps = 0;
-
-	while (
-		AccumulatorSeconds + StepToleranceSeconds
-			>= FixedStepSeconds
-		&& ExecutedSteps < MaxStepsPerFrame)
+	template <typename TStepFunction>
+	int32 Advance(
+		double FrameDeltaSeconds,
+		TStepFunction&& ExecuteStep)
 	{
-		ExecuteStep(FixedStepSeconds);
+		AccumulatorSeconds += FMath::Max(FrameDeltaSeconds, 0.0);
 
-		AccumulatorSeconds -= FixedStepSeconds;
-		++ExecutedSteps;
+		MaxObservedBacklogSeconds = FMath::Max(
+			MaxObservedBacklogSeconds,
+			AccumulatorSeconds);
+
+		const double StepToleranceSeconds =
+			FixedStepSeconds * 1.0e-9;
+
+		int32 ExecutedSteps = 0;
+
+		while (AccumulatorSeconds + StepToleranceSeconds >= FixedStepSeconds
+			&& ExecutedSteps < MaxStepsPerFrame)
+		{
+			ExecuteStep(FixedStepSeconds);
+			AccumulatorSeconds -= FixedStepSeconds;
+			++ExecutedSteps;
+		}
+
+		if (FMath::Abs(AccumulatorSeconds) <= StepToleranceSeconds)
+		{
+			AccumulatorSeconds = 0.0;
+		}
+		else
+		{
+			AccumulatorSeconds = FMath::Max(AccumulatorSeconds, 0.0);
+		}
+
+		if (AccumulatorSeconds + StepToleranceSeconds >= FixedStepSeconds)
+		{
+			++OverloadedFrameCount;
+		}
+
+		return ExecutedSteps;
 	}
 
-	if (FMath::Abs(AccumulatorSeconds)
-		<= StepToleranceSeconds)
+	double GetFixedStepSeconds() const
 	{
-		AccumulatorSeconds = 0.0;
-	}
-	else
-	{
-		AccumulatorSeconds =
-			FMath::Max(AccumulatorSeconds, 0.0);
+		return FixedStepSeconds;
 	}
 
-	if (AccumulatorSeconds + StepToleranceSeconds
-		>= FixedStepSeconds)
+	double GetBacklogSeconds() const
 	{
-		++OverloadedFrameCount;
+		return AccumulatorSeconds;
 	}
 
-	return ExecutedSteps;
-}
-
-	double GetFixedStepSeconds() const { return FixedStepSeconds; }
-	
-	double GetBacklogSeconds() const { return AccumulatorSeconds; }
 	double GetInterpolationAlpha() const
 	{
 		return FMath::Clamp(
@@ -92,20 +90,21 @@ int32 Advance(
 			0.0,
 			1.0);
 	}
+
 	double GetMaxObservedBacklogSeconds() const
 	{
 		return MaxObservedBacklogSeconds;
 	}
+
 	uint64 GetOverloadedFrameCount() const
 	{
 		return OverloadedFrameCount;
 	}
 
 private:
-	double FixedStepSeconds;
-	double AccumulatorSeconds;
-	double MaxObservedBacklogSeconds;
-
-	int32 MaxStepsPerFrame;
-	uint64 OverloadedFrameCount;
+	double FixedStepSeconds = 1.0 / 40.0;
+	double AccumulatorSeconds = 0.0;
+	double MaxObservedBacklogSeconds = 0.0;
+	int32 MaxStepsPerFrame = 5;
+	uint64 OverloadedFrameCount = 0;
 };
