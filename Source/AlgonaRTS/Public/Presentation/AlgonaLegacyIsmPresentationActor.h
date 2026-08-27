@@ -69,4 +69,6 @@ private:
 	bool bHasCameraView = false;
 	bool bHasCullingMode = false;
 	bool bLastCullingEnabled = true;
+	bool bHasSpatialSnapshotMode = false;
+	bool bLastSpatialSnapshotsEnabled = true;
 };

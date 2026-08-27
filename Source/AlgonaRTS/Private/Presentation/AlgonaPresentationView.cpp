@@ -140,6 +140,59 @@ bool FAlgonaPresentationView::IsGroundPointVisible(
 		&& Vertical <= 1.0 + VerticalGuard;
 }
 
+bool FAlgonaPresentationView::GetGroundBounds(
+	double GuardPixels,
+	FVector2D& OutWorldMin,
+	FVector2D& OutWorldMax) const
+{
+	if (!bValid || ViewportWidth <= 0 || ViewportHeight <= 0)
+	{
+		OutWorldMin = FVector2D::ZeroVector;
+		OutWorldMax = FVector2D::ZeroVector;
+		return false;
+	}
+
+	const double HorizontalGuard =
+		GuardPixels / static_cast<double>(ViewportWidth);
+	const double VerticalGuard =
+		GuardPixels / static_cast<double>(ViewportHeight);
+
+	const FVector TopLeft =
+		GroundTopLeft
+		- ViewRight * HorizontalGuard
+		- ViewDown * VerticalGuard;
+	const FVector TopRight =
+		GroundTopLeft
+		+ ViewRight * (1.0 + HorizontalGuard)
+		- ViewDown * VerticalGuard;
+	const FVector BottomLeft =
+		GroundTopLeft
+		- ViewRight * HorizontalGuard
+		+ ViewDown * (1.0 + VerticalGuard);
+	const FVector BottomRight =
+		GroundTopLeft
+		+ ViewRight * (1.0 + HorizontalGuard)
+		+ ViewDown * (1.0 + VerticalGuard);
+
+	OutWorldMin = FVector2D(
+		FMath::Min(
+			FMath::Min(TopLeft.X, TopRight.X),
+			FMath::Min(BottomLeft.X, BottomRight.X)),
+		FMath::Min(
+			FMath::Min(TopLeft.Y, TopRight.Y),
+			FMath::Min(BottomLeft.Y, BottomRight.Y)));
+
+	OutWorldMax = FVector2D(
+		FMath::Max(
+			FMath::Max(TopLeft.X, TopRight.X),
+			FMath::Max(BottomLeft.X, BottomRight.X)),
+		FMath::Max(
+			FMath::Max(TopLeft.Y, TopRight.Y),
+			FMath::Max(BottomLeft.Y, BottomRight.Y)));
+
+	return true;
+}
+
 float FAlgonaPresentationView::GetProjectedVerticalSizePixels(
 	double WorldHeight) const
 {

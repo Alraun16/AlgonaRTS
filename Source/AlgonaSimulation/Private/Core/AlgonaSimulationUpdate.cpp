@@ -68,6 +68,9 @@ bool UAlgonaSimulationSubsystem::UpdateSquadAnchors(float DeltaTime)
 			continue;
 		}
 
+		const FVector OldSpatialCenter = Squad.GetSpatialCenter();
+		const FVector OldAnchorLocation = Squad.AnchorLocation;
+
 		FVector ToTarget =
 			Squad.TargetAnchorLocation - Squad.AnchorLocation;
 		ToTarget.Z = 0.0;
@@ -78,6 +81,14 @@ bool UAlgonaSimulationSubsystem::UpdateSquadAnchors(float DeltaTime)
 		{
 			Squad.AnchorLocation = Squad.TargetAnchorLocation;
 			Squad.bHasMoveTarget = false;
+
+			SquadSpatialGrid.UpdateSquad(
+				Squad.SquadId,
+				OldSpatialCenter,
+				Squad.GetSpatialCenter());
+
+			bAnyAnchorChanged |=
+				!OldAnchorLocation.Equals(Squad.AnchorLocation, KINDA_SMALL_NUMBER);
 			continue;
 		}
 
@@ -91,11 +102,17 @@ bool UAlgonaSimulationSubsystem::UpdateSquadAnchors(float DeltaTime)
 		{
 			Squad.AnchorLocation = Squad.TargetAnchorLocation;
 			Squad.bHasMoveTarget = false;
-			bAnyAnchorChanged = true;
-			continue;
+		}
+		else
+		{
+			Squad.AnchorLocation += MoveDirection * MaxMoveDistance;
 		}
 
-		Squad.AnchorLocation += MoveDirection * MaxMoveDistance;
+		SquadSpatialGrid.UpdateSquad(
+			Squad.SquadId,
+			OldSpatialCenter,
+			Squad.GetSpatialCenter());
+
 		bAnyAnchorChanged = true;
 	}
 

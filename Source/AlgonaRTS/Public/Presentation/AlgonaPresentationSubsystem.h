@@ -8,6 +8,8 @@
 class AAlgonaArmyPresentationActor;
 class AAlgonaLegacyIsmPresentationActor;
 class AAlgonaRTSCameraActor;
+class APlayerController;
+class UCanvas;
 
 /**
  * Owns the local client-side camera and army rendering path.
@@ -24,6 +26,10 @@ public:
 	virtual void Deinitialize() override;
 
 private:
+	void DrawSpatialGridDebug(
+		UCanvas* Canvas,
+		APlayerController* PlayerController);
+
 	UPROPERTY(Transient)
 	TObjectPtr<AAlgonaArmyPresentationActor> ArmyPresentationActor = nullptr;
 
@@ -32,4 +38,6 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<AAlgonaRTSCameraActor> CameraActor = nullptr;
+
+	FDelegateHandle SpatialGridDebugDrawHandle;
 };

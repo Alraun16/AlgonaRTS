@@ -14,6 +14,31 @@ struct ALGONASIMULATION_API FAlgonaSquad
 		return FormationWidth * FormationDepth;
 	}
 
+	/** Center of the currently occupied formation footprint on the ground. */
+	FVector GetSpatialCenter() const
+	{
+		if (MemberCount <= 0 || FormationWidth <= 0)
+		{
+			return AnchorLocation;
+		}
+
+		FVector Forward = FacingDirection.GetSafeNormal2D();
+		if (Forward.IsNearlyZero())
+		{
+			Forward = FVector::ForwardVector;
+		}
+
+		const int32 UsedDepth = FMath::DivideAndRoundUp(
+			MemberCount,
+			FormationWidth);
+		const double HalfOccupiedDepth =
+			static_cast<double>(FMath::Max(UsedDepth - 1, 0))
+			* static_cast<double>(SoldierSpacing)
+			* 0.5;
+
+		return AnchorLocation - Forward * HalfOccupiedDepth;
+	}
+
 	int32 SquadId = INDEX_NONE;
 	int32 MemberCount = 0;
 

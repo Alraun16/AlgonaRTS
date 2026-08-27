@@ -121,6 +121,8 @@ void UAlgonaSimulationSubsystem::Deinitialize()
 	// DestroySoldiers() here. The world owns and tears down the entity manager.
 	SoldierEntities.Reset();
 	Squads.Reset();
+	SquadEntityRanges.Reset();
+	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	PendingMoveCommands.Reset();
 	SoldierEntityConfig = nullptr;
 
@@ -297,6 +299,8 @@ void UAlgonaSimulationSubsystem::InitializeQueries()
 	SoldierSnapshotQuery->AddRequirement<FAlgonaSoldierIdFragment>(
 		EMassFragmentAccess::ReadOnly);
 	SoldierSnapshotQuery->AddRequirement<FTransformFragment>(
+		EMassFragmentAccess::ReadOnly);
+	SoldierSnapshotQuery->AddRequirement<FAlgonaSquadMemberFragment>(
 		EMassFragmentAccess::ReadOnly);
 	SoldierSnapshotQuery->AddTagRequirement<FAlgonaSoldierTag>(
 		EMassFragmentPresence::All);

@@ -1,5 +1,6 @@
 #include "Presentation/AlgonaLegacyIsmPresentationActor.h"
 
+#include "AlgonaPresentationSnapshotSelection.h"
 #include "AlgonaPresentationView.h"
 #include "Presentation/AlgonaPresentationSettings.h"
 #include "Core/AlgonaSimulationSubsystem.h"
@@ -69,31 +70,52 @@ void AAlgonaLegacyIsmPresentationActor::Tick(float DeltaSeconds)
 	const uint64 CurrentSimulationTick = Simulation->GetSimulationTick();
 	const uint64 CurrentRevision = Simulation->GetStateRevision();
 
-	bool bSimulationChanged = false;
-	if (!bHasCapturedState || CurrentRevision != LastStateRevision)
-	{
-		CaptureLatestState(*Simulation);
-		LastStateRevision = CurrentRevision;
-		bHasCapturedState = true;
-		bSimulationChanged = true;
-	}
+	const bool bSimulationChanged =
+		!bHasCapturedState || CurrentRevision != LastStateRevision;
 
 	const bool bCullingEnabled =
 		IsAlgonaP1PresentationCameraCullingEnabled();
 	const bool bCullingModeChanged =
 		!bHasCullingMode || bCullingEnabled != bLastCullingEnabled;
+	const bool bSpatialSnapshotsEnabled =
+		IsAlgonaP1SpatialSnapshotsEnabled();
+	const bool bSpatialSnapshotModeChanged =
+		!bHasSpatialSnapshotMode
+		|| bSpatialSnapshotsEnabled != bLastSpatialSnapshotsEnabled;
 	const bool bCameraChanged = bCullingEnabled && HasCameraViewChanged();
 	const bool bRefreshForCamera =
 		bCameraChanged
 		&& VisibilityRefreshElapsedSeconds >= VisibilityRefreshIntervalSeconds;
 
-	if (bSimulationChanged || bCullingModeChanged || bRefreshForCamera)
+	const bool bNeedsSnapshotCapture =
+		bSimulationChanged
+		|| bCullingModeChanged
+		|| bSpatialSnapshotModeChanged
+		|| (bSpatialSnapshotsEnabled && bRefreshForCamera);
+
+	if (bNeedsSnapshotCapture)
+	{
+		CaptureLatestState(*Simulation);
+		bHasCapturedState = true;
+	}
+
+	if (bSimulationChanged)
+	{
+		LastStateRevision = CurrentRevision;
+	}
+
+	if (bSimulationChanged
+		|| bCullingModeChanged
+		|| bSpatialSnapshotModeChanged
+		|| bRefreshForCamera)
 	{
 		RefreshPresentationWorkingSet(bSimulationChanged);
 		CacheCurrentCameraView();
 		VisibilityRefreshElapsedSeconds = 0.0f;
 		bLastCullingEnabled = bCullingEnabled;
 		bHasCullingMode = true;
+		bLastSpatialSnapshotsEnabled = bSpatialSnapshotsEnabled;
+		bHasSpatialSnapshotMode = true;
 	}
 
 	const bool bSimulationAdvancedWithoutStateChange =
@@ -147,7 +169,12 @@ void AAlgonaLegacyIsmPresentationActor::CaptureLatestState(
 	UAlgonaSimulationSubsystem& Simulation)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaLegacyPresentation_CaptureState);
-	Simulation.ExportSoldierSnapshots(CachedSnapshots, MaxPresentedEntities);
+	CaptureAlgonaPresentationSnapshots(
+		Simulation,
+		GetWorld(),
+		PresentationCamera.Get(),
+		MaxPresentedEntities,
+		CachedSnapshots);
 }
 
 void AAlgonaLegacyIsmPresentationActor::RefreshPresentationWorkingSet(
@@ -161,19 +188,21 @@ void AAlgonaLegacyIsmPresentationActor::RefreshPresentationWorkingSet(
 	NextTargetTransforms.Reserve(CachedSnapshots.Num());
 
 	FAlgonaPresentationView View;
+	UWorld* World = GetWorld();
 	const UCameraComponent* Camera = PresentationCamera.Get();
-	const bool bUseCameraCulling =
+	const bool bUseLegacyPerSoldierCulling =
 		IsAlgonaP1PresentationCameraCullingEnabled()
+		&& !IsAlgonaP1SpatialSnapshotsEnabled()
+		&& World
 		&& Camera
-		&& GetWorld()
-		&& View.Build(*GetWorld(), *Camera);
+		&& View.Build(*World, *Camera);
 
 	const FQuat MeshFacingCorrection =
 		FRotator(0.0f, -90.0f, 0.0f).Quaternion();
 
 	for (const FAlgonaSoldierSnapshot& Snapshot : CachedSnapshots)
 	{
-		if (bUseCameraCulling
+		if (bUseLegacyPerSoldierCulling
 			&& !View.IsGroundPointVisible(Snapshot.Position, CullingGuardPixels))
 		{
 			continue;

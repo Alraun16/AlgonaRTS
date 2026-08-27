@@ -1,5 +1,6 @@
 #include "Presentation/AlgonaArmyPresentationActor.h"
 
+#include "AlgonaPresentationSnapshotSelection.h"
 #include "AlgonaPresentationView.h"
 #include "Presentation/AlgonaPresentationSettings.h"
 #include "Core/AlgonaSimulationSubsystem.h"
@@ -483,24 +484,20 @@ void AAlgonaArmyPresentationActor::Tick(float DeltaSeconds)
 	const uint64 CurrentSimulationTick = Simulation->GetSimulationTick();
 	const uint64 CurrentRevision = Simulation->GetStateRevision();
 
-	bool bSimulationChanged = false;
-	bool bForceSnapshotSnap = false;
-
-	if (!bHasCapturedState || CurrentRevision != LastStateRevision)
-	{
-		bForceSnapshotSnap =
-			bHasCapturedState && CurrentRevision > LastStateRevision + 1;
-
-		CaptureLatestState(*Simulation);
-		LastStateRevision = CurrentRevision;
-		bHasCapturedState = true;
-		bSimulationChanged = true;
-	}
+	const bool bSimulationChanged =
+		!bHasCapturedState || CurrentRevision != LastStateRevision;
+	const bool bForceSnapshotSnap =
+		bHasCapturedState && CurrentRevision > LastStateRevision + 1;
 
 	const bool bCullingEnabled =
 		IsAlgonaP1PresentationCameraCullingEnabled();
 	const bool bCullingModeChanged =
 		!bHasCullingMode || bCullingEnabled != bLastCullingEnabled;
+	const bool bSpatialSnapshotsEnabled =
+		IsAlgonaP1SpatialSnapshotsEnabled();
+	const bool bSpatialSnapshotModeChanged =
+		!bHasSpatialSnapshotMode
+		|| bSpatialSnapshotsEnabled != bLastSpatialSnapshotsEnabled;
 
 	// Screen-significance tiers depend on zoom even when camera culling is
 	// disabled, so camera changes always invalidate this working set.
@@ -509,7 +506,29 @@ void AAlgonaArmyPresentationActor::Tick(float DeltaSeconds)
 		bCameraChanged
 		&& VisibilityRefreshElapsedSeconds >= VisibilityRefreshIntervalSeconds;
 
-	if (bSimulationChanged || bCullingModeChanged || bRefreshForCamera)
+	// Camera movement requires a new export only for the spatial path. The old
+	// full-export path reuses its cached all-soldier snapshot and only re-culls it.
+	const bool bNeedsSnapshotCapture =
+		bSimulationChanged
+		|| bCullingModeChanged
+		|| bSpatialSnapshotModeChanged
+		|| (bCullingEnabled && bSpatialSnapshotsEnabled && bRefreshForCamera);
+
+	if (bNeedsSnapshotCapture)
+	{
+		CaptureLatestState(*Simulation);
+		bHasCapturedState = true;
+	}
+
+	if (bSimulationChanged)
+	{
+		LastStateRevision = CurrentRevision;
+	}
+
+	if (bSimulationChanged
+		|| bCullingModeChanged
+		|| bSpatialSnapshotModeChanged
+		|| bRefreshForCamera)
 	{
 		RefreshPresentationWorkingSet(
 			bSimulationChanged,
@@ -525,6 +544,8 @@ void AAlgonaArmyPresentationActor::Tick(float DeltaSeconds)
 		VisibilityRefreshElapsedSeconds = 0.0f;
 		bLastCullingEnabled = bCullingEnabled;
 		bHasCullingMode = true;
+		bLastSpatialSnapshotsEnabled = bSpatialSnapshotsEnabled;
+		bHasSpatialSnapshotMode = true;
 	}
 
 	const bool bSimulationAdvancedWithoutStateChange =
@@ -782,7 +803,12 @@ void AAlgonaArmyPresentationActor::CaptureLatestState(
 	UAlgonaSimulationSubsystem& Simulation)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaPresentation_CaptureState);
-	Simulation.ExportSoldierSnapshots(CachedSnapshots, MaxPresentedEntities);
+	CaptureAlgonaPresentationSnapshots(
+		Simulation,
+		GetWorld(),
+		PresentationCamera.Get(),
+		MaxPresentedEntities,
+		CachedSnapshots);
 }
 
 void AAlgonaArmyPresentationActor::RefreshPresentationWorkingSet(
@@ -809,8 +835,10 @@ void AAlgonaArmyPresentationActor::RefreshPresentationWorkingSet(
 	const UCameraComponent* Camera = PresentationCamera.Get();
 	const bool bHasValidView =
 		World && Camera && View.Build(*World, *Camera);
-	const bool bUseCameraCulling =
-		IsAlgonaP1PresentationCameraCullingEnabled() && bHasValidView;
+	const bool bUseLegacyPerSoldierCulling =
+		IsAlgonaP1PresentationCameraCullingEnabled()
+		&& !IsAlgonaP1SpatialSnapshotsEnabled()
+		&& bHasValidView;
 
 	ProjectedUnitHeightPixels =
 		bHasValidView
@@ -824,7 +852,7 @@ void AAlgonaArmyPresentationActor::RefreshPresentationWorkingSet(
 
 	for (const FAlgonaSoldierSnapshot& Snapshot : CachedSnapshots)
 	{
-		if (bUseCameraCulling
+		if (bUseLegacyPerSoldierCulling
 			&& !View.IsGroundPointVisible(Snapshot.Position, CullingGuardPixels))
 		{
 			continue;

@@ -4,6 +4,8 @@
 #include "AlgonaSimulationStatus.h"
 #include "Army/AlgonaSoldierSnapshot.h"
 #include "Army/AlgonaSquad.h"
+#include "Spatial/AlgonaSquadSpatialGrid.h"
+#include "Spatial/AlgonaSquadSpatialSnapshot.h"
 
 #include "CoreMinimal.h"
 #include "Mass/EntityHandle.h"
@@ -22,6 +24,7 @@ namespace AlgonaSimulationDefaults
 	inline constexpr int32 MaxStepsPerFrame = 5;
 	inline constexpr int32 SoldierCount = 20000;
 	inline constexpr int32 SquadSize = 50;
+	inline constexpr double SpatialGridCellSizeCm = 5000.0;
 }
 
 /** Command consumed at the beginning of the next authoritative fixed step. */
@@ -80,10 +83,44 @@ public:
 		return Squads.Num();
 	}
 
+	double GetSpatialGridCellSizeCm() const
+	{
+		return SquadSpatialGrid.GetCellSizeCm();
+	}
+
+	FIntPoint GetSpatialGridCellCoordinates(const FVector& WorldPosition) const
+	{
+		return SquadSpatialGrid.GetCellCoordinates(WorldPosition);
+	}
+
+	FVector2D GetSpatialGridCellWorldMin(const FIntPoint& Cell) const
+	{
+		return SquadSpatialGrid.GetCellWorldMin(Cell);
+	}
+
 	FAlgonaSimulationMetrics GetSimulationMetrics() const;
 
-	/** Exports only renderer-neutral ID/position/facing snapshots. */
+	/**
+	 * Full renderer-neutral export retained as a fail-open/debug fallback when
+	 * spatial camera selection is disabled or unavailable.
+	 */
 	int32 ExportSoldierSnapshots(
+		TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
+		int32 MaxEntities);
+
+	/** Returns only squad centers from spatial-grid cells intersecting bounds. */
+	int32 QuerySquadsInBounds(
+		const FVector2D& WorldMin,
+		const FVector2D& WorldMax,
+		TArray<FAlgonaSquadSpatialSnapshot>& OutSquads) const;
+
+	/**
+	 * Exports complete selected squads without scanning unrelated soldiers.
+	 * The caller decides why a squad is relevant; Simulation never sees camera
+	 * or renderer state.
+	 */
+	int32 ExportSoldierSnapshotsForSquads(
+		TConstArrayView<int32> SquadIds,
 		TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
 		int32 MaxEntities);
 
@@ -94,6 +131,12 @@ public:
 	int32 SubmitMoveAllSquadsByOffset(const FVector& Offset);
 
 private:
+	struct FAlgonaSquadEntityRange
+	{
+		int32 FirstSoldierIndex = INDEX_NONE;
+		int32 Count = 0;
+	};
+
 	void InitializeQueries();
 
 	bool CreateSoldiers(
@@ -135,7 +178,11 @@ private:
 	TUniquePtr<FMassEntityQuery> SoldierUpdateQuery;
 	TUniquePtr<FMassEntityQuery> SoldierSnapshotQuery;
 
+	FAlgonaSquadSpatialGrid SquadSpatialGrid{
+		AlgonaSimulationDefaults::SpatialGridCellSizeCm};
+
 	TArray<FMassEntityHandle> SoldierEntities;
 	TArray<FAlgonaSquad> Squads;
+	TArray<FAlgonaSquadEntityRange> SquadEntityRanges;
 	TArray<FAlgonaSquadMoveCommand> PendingMoveCommands;
 };

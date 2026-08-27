@@ -17,6 +17,12 @@ struct FAlgonaPresentationView
 		const FVector& WorldPosition,
 		double GuardPixels) const;
 
+	/** Axis-aligned broadphase bounds of the guarded ground footprint. */
+	bool GetGroundBounds(
+		double GuardPixels,
+		FVector2D& OutWorldMin,
+		FVector2D& OutWorldMax) const;
+
 	float GetProjectedVerticalSizePixels(double WorldHeight) const;
 
 	bool IsValid() const { return bValid; }
