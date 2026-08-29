@@ -1,66 +1,51 @@
 #include "Camera/AlgonaRTSCameraActor.h"
 
 #include "Camera/CameraComponent.h"
-#include "Engine/World.h"
-#include "GameFramework/PlayerController.h"
-#include "InputCoreTypes.h"
+#include "Engine/Engine.h"
 
 AAlgonaRTSCameraActor::AAlgonaRTSCameraActor()
 {
-	PrimaryActorTick.bCanEverTick = true;
-	PrimaryActorTick.bStartWithTickEnabled = true;
-
 	CameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
 	SetRootComponent(CameraComponent);
 
-	CameraComponent->SetProjectionMode(ECameraProjectionMode::Orthographic);
-	CameraComponent->SetOrthoWidth(20000.0f);
-	CameraComponent->SetConstraintAspectRatio(true);
+	// Perspective RTS view.
+	CameraComponent->SetProjectionMode(ECameraProjectionMode::Perspective);
+	CameraComponent->SetFieldOfView(CameraFOV);
+	CameraComponent->SetConstraintAspectRatio(false);
 }
 
-void AAlgonaRTSCameraActor::BeginPlay()
+void AAlgonaRTSCameraActor::UpdateCameraTransform()
 {
-	Super::BeginPlay();
+	const float PitchAlpha = FMath::Clamp(
+		(PitchChangeStartHeight - CameraHeight)
+		/ (PitchChangeStartHeight - PitchChangeEndHeight),
+		0.0f,
+		1.0f);
 
-	const FRotator ViewRotation(-45.0f, -45.0f, 0.0f);
-	SetActorRotation(ViewRotation);
+	const float CurrentPitch = FMath::Lerp(
+		DefaultCameraPitch,
+		CloseCameraPitch,
+		PitchAlpha);
+
+	const FRotator ViewRotation(
+		CurrentPitch,
+		CameraYaw,
+		0.0f);
 
 	const FVector Forward = ViewRotation.Vector();
 	const double DistanceToGround =
-		static_cast<double>(CameraHeight)
-		/ FMath::Max(static_cast<double>(-Forward.Z), 0.001);
+		CameraHeight / -Forward.Z;
 
-	SetActorLocation(InitialGroundFocus - Forward * DistanceToGround);
-
-	UWorld* World = GetWorld();
-	APlayerController* PlayerController =
-		World ? World->GetFirstPlayerController() : nullptr;
-
-	if (!PlayerController)
-	{
-		return;
-	}
-
-	UpdateAspectRatioFromViewport(*PlayerController);
-	PlayerController->SetViewTarget(this);
+	SetActorRotation(ViewRotation);
+	SetActorLocation(
+		GroundFocus - Forward * DistanceToGround);
 }
 
-void AAlgonaRTSCameraActor::Tick(float DeltaSeconds)
+void AAlgonaRTSCameraActor::MoveGroundFocus(
+	float ForwardInput,
+	float RightInput,
+	float DeltaSeconds)
 {
-	Super::Tick(DeltaSeconds);
-
-	UWorld* World = GetWorld();
-	APlayerController* PlayerController =
-		World ? World->GetFirstPlayerController() : nullptr;
-
-	if (!PlayerController)
-	{
-		return;
-	}
-
-	UpdateAspectRatioFromViewport(*PlayerController);
-	UpdateZoom(*PlayerController);
-
 	FVector Forward = GetActorForwardVector();
 	Forward.Z = 0.0;
 	Forward.Normalize();
@@ -69,83 +54,53 @@ void AAlgonaRTSCameraActor::Tick(float DeltaSeconds)
 	Right.Z = 0.0;
 	Right.Normalize();
 
-	FVector MoveDirection = FVector::ZeroVector;
+	FVector MoveDirection =
+		Forward * ForwardInput
+		+ Right * RightInput;
 
-	if (PlayerController->IsInputKeyDown(EKeys::W))
-	{
-		MoveDirection += Forward;
-	}
-	if (PlayerController->IsInputKeyDown(EKeys::S))
-	{
-		MoveDirection -= Forward;
-	}
-	if (PlayerController->IsInputKeyDown(EKeys::D))
-	{
-		MoveDirection += Right;
-	}
-	if (PlayerController->IsInputKeyDown(EKeys::A))
-	{
-		MoveDirection -= Right;
-	}
+	MoveDirection.Normalize();
 
-	if (!MoveDirection.IsNearlyZero())
-	{
-		MoveDirection.Normalize();
+	GroundFocus +=
+		MoveDirection * (CameraHeight * 0.5f) * DeltaSeconds;
 
-		const float CurrentMoveSpeed =
-			CameraComponent
-				? CameraComponent->OrthoWidth * MoveSpeedOrthoWidthMultiplier
-				: 20000.0f;
-
-		AddActorWorldOffset(
-			MoveDirection * CurrentMoveSpeed * DeltaSeconds,
-			false);
-	}
+	UpdateCameraTransform();
 }
 
-void AAlgonaRTSCameraActor::UpdateAspectRatioFromViewport(
-	APlayerController& PlayerController)
+void AAlgonaRTSCameraActor::RotateYaw(
+	float YawDeltaDegrees)
 {
-	if (!CameraComponent)
-	{
-		return;
-	}
+	CameraYaw += YawDeltaDegrees;
 
-	int32 ViewportWidth = 0;
-	int32 ViewportHeight = 0;
-	PlayerController.GetViewportSize(ViewportWidth, ViewportHeight);
-
-	if (ViewportWidth <= 0 || ViewportHeight <= 0)
-	{
-		return;
-	}
-
-	CameraComponent->AspectRatio =
-		static_cast<float>(ViewportWidth)
-		/ static_cast<float>(ViewportHeight);
+	UpdateCameraTransform();
 }
 
-void AAlgonaRTSCameraActor::UpdateZoom(APlayerController& PlayerController)
+void AAlgonaRTSCameraActor::Zoom(float ZoomSteps)
 {
-	if (!CameraComponent)
+	CameraHeight = FMath::Clamp(
+		CameraHeight
+			* FMath::Pow(ZoomFactorPerStep, ZoomSteps),
+		MinCameraHeight,
+		MaxCameraHeight);
+
+	UpdateCameraTransform();
+
+#if !UE_BUILD_SHIPPING
+	if (GEngine)
 	{
-		return;
+		GEngine->AddOnScreenDebugMessage(
+			1001,
+			1.0f,
+			FColor::White,
+			FString::Printf(
+				TEXT("Camera Height: %.0f"),
+				CameraHeight));
 	}
+#endif
+}
 
-	const float WheelDelta =
-		PlayerController.GetInputAnalogKeyState(EKeys::MouseWheelAxis);
+void AAlgonaRTSCameraActor::BeginPlay()
+{
+	Super::BeginPlay();
 
-	if (FMath::IsNearlyZero(WheelDelta))
-	{
-		return;
-	}
-
-	const float ZoomFactor =
-		FMath::Pow(ZoomFactorPerWheelStep, WheelDelta);
-
-	CameraComponent->SetOrthoWidth(
-		FMath::Clamp(
-			CameraComponent->OrthoWidth * ZoomFactor,
-			MinOrthoWidth,
-			MaxOrthoWidth));
+	UpdateCameraTransform();
 }

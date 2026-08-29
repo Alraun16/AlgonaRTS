@@ -1,4 +1,5 @@
 ﻿#include "Game/AlgonaGameMode.h"
+#include "Game/AlgonaPlayerController.h"
 
 #include "GameFramework/Pawn.h"
 
@@ -10,4 +11,5 @@ AAlgonaGameMode::AAlgonaGameMode()
 	 * которым PlayerController может владеть.
 	 */
 	DefaultPawnClass = APawn::StaticClass();
+	PlayerControllerClass = AAlgonaPlayerController::StaticClass();
 }

@@ -15,6 +15,7 @@
 #include "Engine/GameViewportClient.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
+#include "Game/AlgonaPlayerController.h"
 #include "HAL/IConsoleManager.h"
 
 namespace
@@ -106,6 +107,15 @@ void UAlgonaPresentationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	{
 		return;
 	}
+	
+	AAlgonaPlayerController* PlayerController =
+	Cast<AAlgonaPlayerController>(
+		InWorld.GetFirstPlayerController());
+
+	if (PlayerController)
+	{
+		PlayerController->SetRTSCamera(CameraActor);
+	}
 
 #if !UE_BUILD_SHIPPING
 	if (!SpatialGridDebugDrawHandle.IsValid())
@@ -141,7 +151,11 @@ void UAlgonaPresentationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 
 		LegacyPresentationActor->SetPresentationCamera(
 			CameraActor->GetCameraComponent());
-		LegacyPresentationActor->AddTickPrerequisiteActor(CameraActor);
+		if (PlayerController)
+		{
+			LegacyPresentationActor->AddTickPrerequisiteActor(
+				PlayerController);
+		}
 		return;
 	}
 
@@ -161,7 +175,11 @@ void UAlgonaPresentationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 
 	ArmyPresentationActor->SetPresentationCamera(
 		CameraActor->GetCameraComponent());
-	ArmyPresentationActor->AddTickPrerequisiteActor(CameraActor);
+	if (PlayerController)
+	{
+		ArmyPresentationActor->AddTickPrerequisiteActor(
+			PlayerController);
+	}
 }
 
 void UAlgonaPresentationSubsystem::Deinitialize()

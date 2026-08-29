@@ -5,12 +5,11 @@
 
 #include "AlgonaRTSCameraActor.generated.h"
 
-class APlayerController;
 class UCameraComponent;
 
 /**
- * Minimal working RTS camera for the current P1 gameplay loop.
- * Owns orthographic view, WASD movement and wheel zoom.
+ * RTS gameplay camera.
+ * Owns the perspective view and camera transform.
  */
 UCLASS(NotBlueprintable, Transient)
 class ALGONARTS_API AAlgonaRTSCameraActor final : public AActor
@@ -20,8 +19,15 @@ class ALGONARTS_API AAlgonaRTSCameraActor final : public AActor
 public:
 	AAlgonaRTSCameraActor();
 
+	void MoveGroundFocus(
+	float ForwardInput,
+	float RightInput,
+	float DeltaSeconds);
+
+	void RotateYaw(float YawDeltaDegrees);
+	void Zoom(float ZoomSteps);
+	
 	virtual void BeginPlay() override;
-	virtual void Tick(float DeltaSeconds) override;
 
 	UCameraComponent* GetCameraComponent() const
 	{
@@ -29,19 +35,26 @@ public:
 	}
 
 private:
-	void UpdateAspectRatioFromViewport(APlayerController& PlayerController);
-	void UpdateZoom(APlayerController& PlayerController);
-
+	void UpdateCameraTransform();
+	
 	UPROPERTY(VisibleAnywhere, Category = "Algona|RTS Camera")
 	TObjectPtr<UCameraComponent> CameraComponent = nullptr;
 
-	FVector InitialGroundFocus = FVector(10000.0, 15000.0, 0.0);
-	float CameraHeight = 12000.0f;
+	// Point on the ground that the camera looks at and moves across the map.
+	FVector GroundFocus = FVector::ZeroVector;
 
-	// 1.0 moves approximately one visible screen width per second.
-	float MoveSpeedOrthoWidthMultiplier = 1.0f;
+	// Base perspective camera parameters.
+	float CameraHeight = 8000.0f;
+	float MinCameraHeight = 1000.0f;
+	float MaxCameraHeight = 20000.0f;
+	float ZoomFactorPerStep = 0.85f;
+	
+	float DefaultCameraPitch = -35.0f;
+	float CloseCameraPitch = -25.0f;
 
-	float MinOrthoWidth = 3000.0f;
-	float MaxOrthoWidth = 60000.0f;
-	float ZoomFactorPerWheelStep = 0.85f;
+	float PitchChangeStartHeight = 3500.0f;
+	float PitchChangeEndHeight = 1000.0f;
+	
+	float CameraYaw = 45.0f;
+	float CameraFOV = 28.0f;
 };
