@@ -6,6 +6,7 @@ public class AlgonaSimulation : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
+		// Stable Simulation API: Mass state remains the public module boundary.
 		PublicDependencyModuleNames.AddRange(new[]
 		{
 			"Core",
@@ -15,5 +16,8 @@ public class AlgonaSimulation : ModuleRules
 			"MassEntity",
 			"MassSpawner"
 		});
+
+		// UE navigation is an implementation detail of squad command processing.
+		PrivateDependencyModuleNames.Add("NavigationSystem");
 	}
 }

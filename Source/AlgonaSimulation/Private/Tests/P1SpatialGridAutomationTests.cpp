@@ -1,3 +1,5 @@
+// P1 uniform-grid behavior remains unchanged; only squad-center semantics are P2.
+#include "Army/AlgonaFormation.h"
 #include "Army/AlgonaSquad.h"
 #include "Spatial/AlgonaSquadSpatialGrid.h"
 
@@ -17,6 +19,7 @@ bool FAlgonaP1SpatialGridTest::RunTest(const FString& Parameters)
 
 	FAlgonaSquadSpatialGrid Grid(5000.0);
 
+	// Cell indexing/query behavior is the proven P1 implementation.
 	TestTrue(
 		TEXT("Origin is cell 0,0"),
 		Grid.GetCellCoordinates(FVector::ZeroVector) == FIntPoint(0, 0));
@@ -70,16 +73,17 @@ bool FAlgonaP1SpatialGridTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("New cell contains squad 20"), SquadIds[0], 20);
 	}
 
+	// P2 removes the old front-anchor offset. Spatial center is now the same
+	// authoritative geometric center used by formation, movement and the grid.
 	FAlgonaSquad Squad;
-	Squad.MemberCount = 50;
-	Squad.FormationWidth = 10;
-	Squad.SoldierSpacing = 100.0f;
+	Squad.Formation =
+		FAlgonaFormationGenerator::BuildRectangle(50, 100.0f);
 	Squad.AnchorLocation = FVector(1000.0, 0.0, 0.0);
 	Squad.FacingDirection = FVector::ForwardVector;
 
 	TestTrue(
-		TEXT("Spatial center is the occupied formation center, not front anchor"),
-		Squad.GetSpatialCenter().Equals(FVector(800.0, 0.0, 0.0), 0.01));
+		TEXT("Spatial center equals the geometric formation anchor"),
+		Squad.GetSpatialCenter().Equals(FVector(1000.0, 0.0, 0.0), 0.01));
 
 	return true;
 }

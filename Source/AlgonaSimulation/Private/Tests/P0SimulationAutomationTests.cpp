@@ -1,4 +1,6 @@
+// Core fixed-step and authoritative data types kept stable across P2.
 #include "Core/AlgonaFixedStepAccumulator.h"
+#include "Army/AlgonaFormation.h"
 #include "Army/AlgonaSoldierFragments.h"
 #include "Army/AlgonaSoldierSnapshot.h"
 #include "Army/AlgonaSquad.h"
@@ -18,24 +20,31 @@ bool FAlgonaP0SimulationTypesTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
 
+	// Mass storage contract: P2 adds state inside the existing fragments rather
+	// than switching stationary/moving soldiers between archetypes.
 	TestTrue(
 		TEXT("Soldier ID is a Mass fragment"),
 		FAlgonaSoldierIdFragment::StaticStruct()->IsChildOf(
 			FMassFragment::StaticStruct()));
-
 	TestTrue(
 		TEXT("Squad membership is a Mass fragment"),
 		FAlgonaSquadMemberFragment::StaticStruct()->IsChildOf(
 			FMassFragment::StaticStruct()));
-
 	TestTrue(
 		TEXT("Movement state is a Mass fragment"),
 		FAlgonaSoldierMovementFragment::StaticStruct()->IsChildOf(
 			FMassFragment::StaticStruct()));
 
-	const FAlgonaSquad DefaultSquad;
+	FAlgonaSquad DefaultSquad;
+	TestTrue(
+		TEXT("Default soldier spacing is 150 cm"),
+		FMath::IsNearlyEqual(DefaultSquad.SoldierSpacingCm, 150.0f));
+	DefaultSquad.Formation =
+		FAlgonaFormationGenerator::BuildRectangle(
+			50,
+			DefaultSquad.SoldierSpacingCm);
 	TestEqual(
-		TEXT("Default squad has 50 formation slots"),
+		TEXT("Generated default-size squad has 50 formation slots"),
 		DefaultSquad.GetFormationCapacity(),
 		50);
 
@@ -44,16 +53,28 @@ bool FAlgonaP0SimulationTypesTest::RunTest(const FString& Parameters)
 		TEXT("Default soldier state is Idle"),
 		DefaultMovement.State,
 		EAlgonaSoldierMovementState::Idle);
+	TestEqual(
+		TEXT("Default soldier formation state is Active"),
+		FAlgonaSquadMemberFragment().FormationState,
+		EAlgonaSoldierFormationState::Active);
 
 	TestFalse(
 		TEXT("Default squad has no active move target"),
 		DefaultSquad.bHasMoveTarget);
 	TestTrue(
-		TEXT("Default squad anchor speed is positive"),
-		DefaultSquad.AnchorMoveSpeed > 0.0f);
+		TEXT("Default walk speed is positive"),
+		DefaultSquad.WalkSpeedCmPerSecond > 0.0f);
 	TestTrue(
-		TEXT("Default soldier follow speed is positive"),
-		DefaultSquad.SoldierMoveSpeed > 0.0f);
+		TEXT("Default run speed exceeds walk speed"),
+		DefaultSquad.RunSpeedCmPerSecond > DefaultSquad.WalkSpeedCmPerSecond);
+	TestEqual(
+		TEXT("Default run speed is 5 m/s"),
+		DefaultSquad.RunSpeedCmPerSecond,
+		500.0f);
+	TestEqual(
+		TEXT("Active soldier catch-up limit is 6 m/s"),
+		DefaultSquad.GetActiveSoldierSpeedLimit(),
+		600.0f);
 
 	const FAlgonaSoldierSnapshot DefaultSnapshot;
 	TestEqual(

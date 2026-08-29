@@ -1,8 +1,11 @@
 #include "Core/AlgonaSimulationSubsystem.h"
 
+// Soldier template, authoritative fragments and formation geometry.
+#include "Army/AlgonaFormation.h"
 #include "Army/AlgonaSoldierFragments.h"
 #include "Army/AlgonaSoldierTrait.h"
 
+// Mass spawning, direct rare entity initialization and P1 snapshot export.
 #include "Engine/World.h"
 #include "Mass/EntityFragments.h"
 #include "MassEntityConfigAsset.h"
@@ -13,6 +16,25 @@
 #include "MassEntityView.h"
 #include "MassSpawnerSubsystem.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+
+namespace
+{
+	uint32 HashVariation(uint32 Value)
+	{
+		Value ^= Value >> 16;
+		Value *= 0x7FEB352Du;
+		Value ^= Value >> 15;
+		Value *= 0x846CA68Bu;
+		Value ^= Value >> 16;
+		return Value;
+	}
+
+	float HashToUnitFloat(uint32 Seed, uint32 Salt)
+	{
+		const uint32 Hash = HashVariation(Seed ^ Salt);
+		return static_cast<float>(Hash & 0xFFFFu) / 65535.0f;
+	}
+}
 
 bool UAlgonaSimulationSubsystem::CreateSoldiers(
 	int32 SoldierCount,
@@ -94,26 +116,23 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 	FMassEntityManager& EntityManager =
 		MassEntitySubsystem->GetMutableEntityManager();
 
+	// Keep the proven 60-squads-per-row layout; P2 intentionally opens soldier spacing to 150 cm.
 	constexpr int32 SquadsPerRow = 60;
-	constexpr float SpaceBetweenSquads = 600.0f;
-	constexpr float SoldierSpacing = 100.0f;
+	constexpr float SpaceBetweenSquadsCm = 600.0f;
+	constexpr float SoldierSpacingCm = 150.0f;
 
-	const int32 FormationWidth = FMath::Min(
-		10,
-		RequestedSquadSize);
-	const int32 FormationDepth = FMath::DivideAndRoundUp(
-		RequestedSquadSize,
-		FormationWidth);
-
-	const float FormationWorldDepth =
-		static_cast<float>(FormationDepth - 1) * SoldierSpacing;
-	const float FormationWorldWidth =
-		static_cast<float>(FormationWidth - 1) * SoldierSpacing;
-
+	const FAlgonaFormationLayout ReferenceFormation =
+		FAlgonaFormationGenerator::BuildRectangle(
+			RequestedSquadSize,
+			SoldierSpacingCm);
+	const float FormationWorldDepthCm =
+		ReferenceFormation.HalfExtentsCm.Y * 2.0f;
+	const float FormationWorldWidthCm =
+		ReferenceFormation.HalfExtentsCm.X * 2.0f;
 	const float SquadSpacingX =
-		FormationWorldDepth + SpaceBetweenSquads;
+		FormationWorldDepthCm + SpaceBetweenSquadsCm;
 	const float SquadSpacingY =
-		FormationWorldWidth + SpaceBetweenSquads;
+		FormationWorldWidthCm + SpaceBetweenSquadsCm;
 
 	const int32 SquadCount = FMath::DivideAndRoundUp(
 		SoldierEntities.Num(),
@@ -133,27 +152,32 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 	{
 		FAlgonaSquad Squad;
 		Squad.SquadId = SquadIndex;
-		Squad.FormationWidth = FormationWidth;
-		Squad.FormationDepth = FormationDepth;
-		Squad.SoldierSpacing = SoldierSpacing;
-		Squad.MemberCount = FMath::Min(
+		Squad.SoldierSpacingCm = SoldierSpacingCm;
+		Squad.TotalMemberCount = FMath::Min(
 			RequestedSquadSize,
 			SoldierEntities.Num() - SoldierIndex);
+		Squad.ActiveMemberSoldierIndices.Reserve(Squad.TotalMemberCount);
+		Squad.Formation = FAlgonaFormationGenerator::BuildRectangle(
+			Squad.TotalMemberCount,
+			Squad.SoldierSpacingCm,
+			Squad.RequestedMaxSlotsPerRow);
 
 		const int32 FirstSoldierIndex = SoldierIndex;
 		const int32 SquadX = SquadIndex % SquadsPerRow;
 		const int32 SquadY = SquadIndex / SquadsPerRow;
 
+		// Geometric-center anchor preserves the same initial occupied footprint as
+		// P1, but removes the old front-center special case from all later logic.
 		Squad.AnchorLocation = FVector(
 			static_cast<double>(SquadX) * SquadSpacingX
-				+ FormationWorldDepth,
+				+ FormationWorldDepthCm * 0.5,
 			static_cast<double>(SquadY) * SquadSpacingY
-				+ FormationWorldWidth * 0.5,
+				+ FormationWorldWidthCm * 0.5,
 			0.0);
-		Squad.TargetAnchorLocation = Squad.AnchorLocation;
+		Squad.FinalTargetLocation = Squad.AnchorLocation;
 
 		for (int32 SlotIndex = 0;
-			SlotIndex < Squad.MemberCount;
+			SlotIndex < Squad.TotalMemberCount;
 			++SlotIndex)
 		{
 			if (!SoldierEntities.IsValidIndex(SoldierIndex))
@@ -163,7 +187,6 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 
 			const FMassEntityHandle SoldierEntity =
 				SoldierEntities[SoldierIndex];
-
 			if (!EntityManager.IsEntityValid(SoldierEntity))
 			{
 				return false;
@@ -179,12 +202,34 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 				EntityView.GetFragmentData<FAlgonaSquadMemberFragment>();
 			Member.SquadId = Squad.SquadId;
 			Member.SlotIndex = SlotIndex;
+			Member.FormationState = EAlgonaSoldierFormationState::Active;
 
 			FAlgonaSoldierMovementFragment& Movement =
 				EntityView.GetFragmentData<FAlgonaSoldierMovementFragment>();
 			Movement.Velocity = FVector::ZeroVector;
 			Movement.LastProcessedSimulationTick = 0;
 			Movement.State = EAlgonaSoldierMovementState::Idle;
+			Movement.DistanceState = EAlgonaSoldierDistanceState::Near;
+			Movement.PassageState = EAlgonaSoldierPassageState::Formation;
+
+			// Stable speed/turn differences keep 20k soldiers from behaving like one
+			// copied transform. Per-command drift data is generated lazily in the
+			// existing Mass pass, so no extra army scan is introduced.
+			Movement.MotionVariationSeed = HashVariation(Id.Value);
+			Movement.PersonalSpeedScale = FMath::Lerp(
+				0.90f,
+				1.0f,
+				HashToUnitFloat(Id.Value, 0xB5297A4Du));
+			Movement.BodyTurnSpeedScale = FMath::Lerp(
+				0.85f,
+				1.15f,
+				HashToUnitFloat(Id.Value, 0x1B56C4E9u));
+			Movement.CommandVariationRevision = 0;
+			Movement.TravelDriftSegmentLengthCm = 2250.0f;
+			Movement.CommandStartSideOffsetCm = 0.0f;
+			Movement.CurrentSideOffsetCm = 0.0f;
+
+			Squad.ActiveMemberSoldierIndices.Add(SoldierIndex);
 
 			FTransform InitialTransform = FTransform::Identity;
 			InitialTransform.SetLocation(
@@ -201,10 +246,11 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 
 		Squads.Add(MoveTemp(Squad));
 
+		// Keep physical spawn ranges unchanged for the optimized P1 exporter.
 		FAlgonaSquadEntityRange& EntityRange =
 			SquadEntityRanges.AddDefaulted_GetRef();
 		EntityRange.FirstSoldierIndex = FirstSoldierIndex;
-		EntityRange.Count = Squads.Last().MemberCount;
+		EntityRange.Count = Squads.Last().TotalMemberCount;
 
 		SquadSpatialGrid.AddSquad(
 			Squads.Last().SquadId,
@@ -229,6 +275,7 @@ void UAlgonaSimulationSubsystem::DestroySoldiers()
 	SquadEntityRanges.Reset();
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	PendingMoveCommands.Reset();
+	RecoveredLostSoldierIndices.Reset();
 	SoldierEntityConfig = nullptr;
 
 	Metrics.EntityCount = 0;
@@ -252,7 +299,7 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshotsForSquads(
 	}
 
 	// Count complete valid squads first. This gives us the exact selected
-	// soldier count before choosing the cheaper export strategy.
+	// soldier count before choosing the cheaper P1 export strategy.
 	int32 SelectedSoldierCount = 0;
 	int32 AcceptedSquadCount = 0;
 	for (const int32 SquadId : SquadIds)
@@ -287,9 +334,7 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshotsForSquads(
 		MassEntitySubsystem->GetMutableEntityManager();
 
 	// Measured P1 crossover: direct selected-entity reads are cheaper for a
-	// small working set, while one contiguous Mass chunk pass wins once a
-	// meaningful fraction of the army is selected. 20% is intentionally
-	// conservative and should be retuned only from measurements.
+	// small working set, while one contiguous Mass chunk pass wins at about 6%.
 	constexpr int32 FullScanRatioNumerator = 3;
 	constexpr int32 FullScanRatioDenominator = 50;
 	const bool bUseFilteredFullScan =
@@ -300,9 +345,6 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshotsForSquads(
 	{
 		TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_ExportSelectedSquads_Direct);
 
-		// Small working set: restore the original selective path. It avoids
-		// touching unrelated soldiers and benchmarked faster than constructing
-		// a temporary Mass collection for selected handles.
 		int32 ProcessedSquadCount = 0;
 		for (const int32 SquadId : SquadIds)
 		{
@@ -365,8 +407,7 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshotsForSquads(
 	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_ExportSelectedSquads_FilteredFullScan);
 
 	// Large working set: scan the soldier archetype once in chunk order, but
-	// emit snapshots only for squads selected by Presentation. The caller still
-	// supplies only renderer-neutral SquadIds; Simulation never sees a camera.
+	// emit snapshots only for squads selected by Presentation.
 	TArray<uint8> SelectedSquadMask;
 	SelectedSquadMask.Init(0, Squads.Num());
 
@@ -431,7 +472,7 @@ FVector UAlgonaSimulationSubsystem::ComputeSlotWorldPosition(
 	const FAlgonaSquad& Squad,
 	int32 SlotIndex) const
 {
-	if (SlotIndex < 0 || Squad.FormationWidth <= 0)
+	if (!Squad.Formation.IsValidSlot(SlotIndex))
 	{
 		return Squad.AnchorLocation;
 	}
@@ -445,18 +486,10 @@ FVector UAlgonaSimulationSubsystem::ComputeSlotWorldPosition(
 	const FVector Right = FVector::CrossProduct(
 		FVector::UpVector,
 		Forward).GetSafeNormal();
-
-	const int32 Row = SlotIndex / Squad.FormationWidth;
-	const int32 Column = SlotIndex % Squad.FormationWidth;
-
-	const double ForwardOffset =
-		-static_cast<double>(Row) * Squad.SoldierSpacing;
-	const double RightOffset =
-		(static_cast<double>(Column)
-			- static_cast<double>(Squad.FormationWidth - 1) * 0.5)
-		* Squad.SoldierSpacing;
+	const FVector2D LocalPosition =
+		Squad.Formation.Slots[SlotIndex].LocalPosition;
 
 	return Squad.AnchorLocation
-		+ Forward * ForwardOffset
-		+ Right * RightOffset;
+		+ Right * static_cast<double>(LocalPosition.X)
+		+ Forward * static_cast<double>(LocalPosition.Y);
 }

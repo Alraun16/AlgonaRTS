@@ -1,7 +1,9 @@
 #include "Core/AlgonaSimulationSubsystem.h"
 
+// Authoritative soldier fragments queried by the fixed-step core.
 #include "Army/AlgonaSoldierFragments.h"
 
+// Unreal world/Mass services and profiling used by the subsystem.
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
 #include "Mass/EntityFragments.h"
@@ -24,7 +26,7 @@ namespace
 	TAutoConsoleVariable<int32> CVarAlgonaP0SquadSize(
 		TEXT("algona.P0.SquadSize"),
 		AlgonaSimulationDefaults::SquadSize,
-		TEXT("Requested number of soldiers in one P0/P1 squad."),
+		TEXT("Requested number of soldiers in one Algona squad."),
 		ECVF_Default);
 }
 
@@ -45,8 +47,7 @@ bool UAlgonaSimulationSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 		World->WorldType == EWorldType::Game
 		|| World->WorldType == EWorldType::PIE;
 
-	// Simulation runs in standalone and on the authoritative server, not on
-	// ordinary network clients.
+	// Simulation exists only where authoritative gameplay state is allowed.
 	return bPlayableWorld && World->GetNetMode() != NM_Client;
 }
 
@@ -71,10 +72,12 @@ void UAlgonaSimulationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	Super::OnWorldBeginPlay(InWorld);
 	(void)InWorld;
 
+	// Reset all world-local counters before creating the authoritative army.
 	FixedStepAccumulator.Reset();
 	SimulationTick = 0;
 	StateRevision = 0;
 	Metrics = FAlgonaSimulationMetrics();
+	RecoveredLostSoldierIndices.Reset();
 
 	if (!IsAuthoritativeSimulationWorld())
 	{
@@ -124,6 +127,7 @@ void UAlgonaSimulationSubsystem::Deinitialize()
 	SquadEntityRanges.Reset();
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	PendingMoveCommands.Reset();
+	RecoveredLostSoldierIndices.Reset();
 	SoldierEntityConfig = nullptr;
 
 	Metrics.EntityCount = 0;
@@ -146,6 +150,8 @@ void UAlgonaSimulationSubsystem::Tick(float DeltaTime)
 		return;
 	}
 
+	// Render frame time only feeds the accumulator; authoritative work executes
+	// in fixed 40 Hz steps and can catch up after a slow frame without time loss.
 	Metrics.LastExecutedStepsThisFrame =
 		FixedStepAccumulator.Advance(
 			static_cast<double>(DeltaTime),
@@ -209,6 +215,7 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshots(
 	FMassExecutionContext ExecutionContext =
 		EntityManager.CreateExecutionContext(0.0f);
 
+	// P1 full-export fallback remains renderer-neutral and chunk-contiguous.
 	SoldierSnapshotQuery->ForEachEntityChunk(
 		ExecutionContext,
 		[&OutSnapshots, SafeMaxEntities](FMassExecutionContext& Context)
@@ -237,9 +244,44 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshots(
 	return OutSnapshots.Num();
 }
 
+bool UAlgonaSimulationSubsystem::GetSquadCenter(
+	int32 SquadId,
+	FVector& OutCenter) const
+{
+	if (!Squads.IsValidIndex(SquadId)
+		|| Squads[SquadId].SquadId != SquadId)
+	{
+		return false;
+	}
+
+	OutCenter = Squads[SquadId].GetSpatialCenter();
+	return true;
+}
+
+bool UAlgonaSimulationSubsystem::GetSquadCommandPreview(
+	int32 SquadId,
+	FAlgonaSquadCommandPreview& OutPreview) const
+{
+	if (!Squads.IsValidIndex(SquadId)
+		|| Squads[SquadId].SquadId != SquadId)
+	{
+		return false;
+	}
+
+	const FAlgonaSquad& Squad = Squads[SquadId];
+	OutPreview.Center = Squad.AnchorLocation;
+	OutPreview.ActiveUnitCount = Squad.ActiveMemberSoldierIndices.Num();
+	OutPreview.CurrentMaxSlotsPerRow = Squad.Formation.MaxSlotsPerRow;
+	OutPreview.SlotSpacingCm = Squad.SoldierSpacingCm;
+	return true;
+}
+
 bool UAlgonaSimulationSubsystem::SubmitMoveSquadCommand(
 	int32 SquadId,
-	const FVector& TargetLocation)
+	const FVector& TargetLocation,
+	EAlgonaSquadMovePace Pace,
+	const FVector& FinalFacingDirection,
+	int32 RequestedMaxSlotsPerRow)
 {
 	if (!IsAuthoritativeSimulationWorld()
 		|| !Squads.IsValidIndex(SquadId)
@@ -248,10 +290,14 @@ bool UAlgonaSimulationSubsystem::SubmitMoveSquadCommand(
 		return false;
 	}
 
+	// Commands are queued and become authoritative only at the next fixed step.
 	FAlgonaSquadMoveCommand& Command =
 		PendingMoveCommands.AddDefaulted_GetRef();
 	Command.SquadId = SquadId;
 	Command.TargetLocation = TargetLocation;
+	Command.Pace = Pace;
+	Command.FinalFacingDirection = FinalFacingDirection.GetSafeNormal2D();
+	Command.RequestedMaxSlotsPerRow = FMath::Max(0, RequestedMaxSlotsPerRow);
 	return true;
 }
 
@@ -269,7 +315,8 @@ int32 UAlgonaSimulationSubsystem::SubmitMoveAllSquadsByOffset(
 	{
 		if (SubmitMoveSquadCommand(
 			Squad.SquadId,
-			Squad.AnchorLocation + Offset))
+			Squad.AnchorLocation + Offset,
+			EAlgonaSquadMovePace::Run))
 		{
 			++SubmittedCommands;
 		}
@@ -283,8 +330,12 @@ void UAlgonaSimulationSubsystem::InitializeQueries()
 	FMassEntityManager& EntityManager =
 		MassEntitySubsystem->GetMutableEntityManager();
 
+	// One authoritative hot-loop query visits each soldier exactly once per
+	// fixed step and also accumulates cohesion distance categories.
 	SoldierUpdateQuery =
 		MakeUnique<FMassEntityQuery>(EntityManager.AsShared());
+	SoldierUpdateQuery->AddRequirement<FAlgonaSoldierIdFragment>(
+		EMassFragmentAccess::ReadOnly);
 	SoldierUpdateQuery->AddRequirement<FTransformFragment>(
 		EMassFragmentAccess::ReadWrite);
 	SoldierUpdateQuery->AddRequirement<FAlgonaSquadMemberFragment>(
@@ -294,6 +345,7 @@ void UAlgonaSimulationSubsystem::InitializeQueries()
 	SoldierUpdateQuery->AddTagRequirement<FAlgonaSoldierTag>(
 		EMassFragmentPresence::All);
 
+	// P1 snapshot query is intentionally unchanged in shape.
 	SoldierSnapshotQuery =
 		MakeUnique<FMassEntityQuery>(EntityManager.AsShared());
 	SoldierSnapshotQuery->AddRequirement<FAlgonaSoldierIdFragment>(
