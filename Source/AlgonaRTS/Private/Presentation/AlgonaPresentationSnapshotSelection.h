@@ -2,12 +2,12 @@
 
 #include "CoreMinimal.h"
 
-struct FAlgonaSoldierSnapshot;
+struct FAlgonaUnitSnapshot;
 class UAlgonaSimulationSubsystem;
 class UCameraComponent;
 class UWorld;
 
-/** Runtime A/B switch: false = full soldier export, true = squad-grid export. */
+/** Runtime A/B switch: false = full unit export, true = unit-grid export. */
 bool IsAlgonaP1SpatialSnapshotsEnabled();
 
 #if !UE_BUILD_SHIPPING
@@ -23,14 +23,10 @@ struct FAlgonaPresentationSnapshotMetrics
 	double AverageExportMilliseconds = 0.0;
 	double LastGridQueryMilliseconds = 0.0;
 	double AverageGridQueryMilliseconds = 0.0;
-	double LastSquadTestMilliseconds = 0.0;
-	double AverageSquadTestMilliseconds = 0.0;
 
-	int32 CandidateSquadCount = 0;
-	int32 VisibleSquadCount = 0;
-	int32 TotalSquadCount = 0;
-	int32 ExportedSoldierCount = 0;
-	int32 TotalSoldierCount = 0;
+	int32 CandidateUnitCount = 0;
+	int32 ExportedUnitCount = 0;
+	int32 TotalUnitCount = 0;
 	uint64 SampleCount = 0;
 };
 
@@ -42,13 +38,13 @@ void ClearAlgonaPresentationSnapshotMetrics(const UWorld* World);
 #endif
 
 /**
- * Builds the renderer-neutral soldier snapshot set for the current local view.
- * Presentation owns camera visibility; Simulation receives only selected
- * SquadIds and exports those squads in full when spatial snapshots are enabled.
+ * Builds the renderer-neutral unit snapshot set for the current local view.
+ * Presentation owns camera visibility; Simulation receives only world bounds
+ * and UnitIds, never camera or renderer state.
  */
 void CaptureAlgonaPresentationSnapshots(
 	UAlgonaSimulationSubsystem& Simulation,
 	UWorld* World,
 	const UCameraComponent* Camera,
 	int32 MaxEntities,
-	TArray<FAlgonaSoldierSnapshot>& OutSnapshots);
+	TArray<FAlgonaUnitSnapshot>& OutSnapshots);

@@ -1,6 +1,6 @@
 #include "Core/AlgonaFixedStepAccumulator.h"
-#include "Army/AlgonaSoldierFragments.h"
-#include "Army/AlgonaSoldierSnapshot.h"
+#include "Army/AlgonaUnitFragments.h"
+#include "Army/AlgonaUnitSnapshot.h"
 #include "Army/AlgonaSquad.h"
 
 #include "Mass/EntityElementTypes.h"
@@ -19,8 +19,8 @@ bool FAlgonaP0SimulationTypesTest::RunTest(const FString& Parameters)
 	(void)Parameters;
 
 	TestTrue(
-		TEXT("Soldier ID is a Mass fragment"),
-		FAlgonaSoldierIdFragment::StaticStruct()->IsChildOf(
+		TEXT("Unit ID is a Mass fragment"),
+		FAlgonaUnitIdFragment::StaticStruct()->IsChildOf(
 			FMassFragment::StaticStruct()));
 
 	TestTrue(
@@ -30,7 +30,7 @@ bool FAlgonaP0SimulationTypesTest::RunTest(const FString& Parameters)
 
 	TestTrue(
 		TEXT("Movement state is a Mass fragment"),
-		FAlgonaSoldierMovementFragment::StaticStruct()->IsChildOf(
+		FAlgonaUnitMovementFragment::StaticStruct()->IsChildOf(
 			FMassFragment::StaticStruct()));
 
 	const FAlgonaSquad DefaultSquad;
@@ -39,11 +39,11 @@ bool FAlgonaP0SimulationTypesTest::RunTest(const FString& Parameters)
 		DefaultSquad.GetFormationCapacity(),
 		50);
 
-	const FAlgonaSoldierMovementFragment DefaultMovement;
+	const FAlgonaUnitMovementFragment DefaultMovement;
 	TestEqual(
-		TEXT("Default soldier state is Idle"),
+		TEXT("Default unit state is Idle"),
 		DefaultMovement.State,
-		EAlgonaSoldierMovementState::Idle);
+		EAlgonaUnitMovementState::Idle);
 
 	TestFalse(
 		TEXT("Default squad has no active move target"),
@@ -52,10 +52,10 @@ bool FAlgonaP0SimulationTypesTest::RunTest(const FString& Parameters)
 		TEXT("Default squad anchor speed is positive"),
 		DefaultSquad.AnchorMoveSpeed > 0.0f);
 	TestTrue(
-		TEXT("Default soldier follow speed is positive"),
-		DefaultSquad.SoldierMoveSpeed > 0.0f);
+		TEXT("Default unit follow speed is positive"),
+		DefaultSquad.UnitMoveSpeed > 0.0f);
 
-	const FAlgonaSoldierSnapshot DefaultSnapshot;
+	const FAlgonaUnitSnapshot DefaultSnapshot;
 	TestEqual(
 		TEXT("Default snapshot has no session ID"),
 		DefaultSnapshot.EntityId,

@@ -2,10 +2,10 @@
 
 #include "AlgonaFixedStepAccumulator.h"
 #include "AlgonaSimulationStatus.h"
-#include "Army/AlgonaSoldierSnapshot.h"
+#include "Army/AlgonaUnitSnapshot.h"
 #include "Army/AlgonaSquad.h"
 #include "Spatial/AlgonaSquadSpatialGrid.h"
-#include "Spatial/AlgonaSoldierSpatialGrid.h"
+#include "Spatial/AlgonaUnitSpatialGrid.h"
 #include "Spatial/AlgonaSquadSpatialSnapshot.h"
 
 #include "CoreMinimal.h"
@@ -23,9 +23,13 @@ namespace AlgonaSimulationDefaults
 {
 	inline constexpr double FixedStepSeconds = 1.0 / 40.0;
 	inline constexpr int32 MaxStepsPerFrame = 5;
-	inline constexpr int32 SoldierCount = 20000;
+	inline constexpr int32 UnitCount = 20000;
 	inline constexpr int32 SquadSize = 50;
 	inline constexpr double SpatialGridCellSizeCm = 10000.0;
+
+	// Dormant squad-level spatial index. Change only this value to re-enable
+	// population and updates when squad-level spatial queries are needed again.
+	inline constexpr bool EnableSquadSpatialGrid = false;
 }
 
 /** Command consumed at the beginning of the next authoritative fixed step. */
@@ -33,15 +37,6 @@ struct FAlgonaSquadMoveCommand
 {
 	int32 SquadId = INDEX_NONE;
 	FVector TargetLocation = FVector::ZeroVector;
-};
-
-
-enum class EAlgonaSpatialGridMode : uint8
-{
-	None = 0,
-	Squads = 1,
-	Soldiers = 2,
-	Both = 3
 };
 
 /**
@@ -83,9 +78,9 @@ public:
 		return FixedStepAccumulator.GetInterpolationAlpha();
 	}
 
-	int32 GetSoldierCount() const
+	int32 GetUnitCount() const
 	{
-		return SoldierEntities.Num();
+		return UnitEntities.Num();
 	}
 
 	int32 GetSquadCount() const
@@ -93,19 +88,21 @@ public:
 		return Squads.Num();
 	}
 
-	double GetSpatialGridCellSizeCm() const
+	double GetUnitSpatialGridCellSizeCm() const
 	{
-		return SquadSpatialGrid.GetCellSizeCm();
+		return UnitSpatialGrid.GetCellSizeCm();
 	}
 
-	FIntPoint GetSpatialGridCellCoordinates(const FVector& WorldPosition) const
+	FIntPoint GetUnitSpatialGridCellCoordinates(
+		const FVector& WorldPosition) const
 	{
-		return SquadSpatialGrid.GetCellCoordinates(WorldPosition);
+		return UnitSpatialGrid.GetCellCoordinates(WorldPosition);
 	}
 
-	FVector2D GetSpatialGridCellWorldMin(const FIntPoint& Cell) const
+	FVector2D GetUnitSpatialGridCellWorldMin(
+		const FIntPoint& Cell) const
 	{
-		return SquadSpatialGrid.GetCellWorldMin(Cell);
+		return UnitSpatialGrid.GetCellWorldMin(Cell);
 	}
 
 	FAlgonaSimulationMetrics GetSimulationMetrics() const;
@@ -114,43 +111,40 @@ public:
 	 * Full renderer-neutral export retained as a fail-open/debug fallback when
 	 * spatial camera selection is disabled or unavailable.
 	 */
-	int32 ExportSoldierSnapshots(
-		TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
+	int32 ExportUnitSnapshots(
+		TArray<FAlgonaUnitSnapshot>& OutSnapshots,
 		int32 MaxEntities);
 
-	/** Returns only squad centers from spatial-grid cells intersecting bounds. */
+	/** Returns UnitIds from unit-grid cells intersecting the requested bounds. */
+	int32 QueryUnitIdsInBounds(
+		const FVector2D& WorldMin,
+		const FVector2D& WorldMax,
+		TArray<uint32>& OutUnitIds) const;
+
+	/**
+	 * Dormant squad-level spatial query retained for future simulation systems.
+	 * Returns no results while EnableSquadSpatialGrid is false.
+	 */
 	int32 QuerySquadsInBounds(
 		const FVector2D& WorldMin,
 		const FVector2D& WorldMax,
 		TArray<FAlgonaSquadSpatialSnapshot>& OutSquads) const;
 
 	/**
-	 * Exports complete selected squads without scanning unrelated soldiers.
-	 * The caller decides why a squad is relevant; Simulation never sees camera
-	 * or renderer state.
+	 * Exports complete selected squads. Retained with the dormant squad-grid
+	 * path so squad-level spatial selection can be reconnected without redesign.
 	 */
-	int32 ExportSoldierSnapshotsForSquads(
+	int32 ExportUnitSnapshotsForSquads(
 		TConstArrayView<int32> SquadIds,
-		TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
+		TArray<FAlgonaUnitSnapshot>& OutSnapshots,
 		int32 MaxEntities);
-	
-	int32 ExportSoldierSnapshotsForSoldierIds(
-	TConstArrayView<uint32> SoldierIds,
-	TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
-	int32 MaxEntities);
-	
-#if !UE_BUILD_SHIPPING
-	void BenchmarkSpatialGridQueries(
-		const FVector2D& WorldMin,
-		const FVector2D& WorldMax,
-		int32 Iterations) const;
 
-	void BenchmarkSoldierSnapshotCrossover(
-		const FVector2D& WorldMin,
-		const FVector2D& WorldMax,
-		int32 Iterations);
-#endif
-	
+	/** Exports only the units selected by renderer-neutral UnitIds. */
+	int32 ExportUnitSnapshotsForUnitIds(
+		TConstArrayView<uint32> UnitIds,
+		TArray<FAlgonaUnitSnapshot>& OutSnapshots,
+		int32 MaxEntities);
+
 	bool SubmitMoveSquadCommand(
 		int32 SquadId,
 		const FVector& TargetLocation);
@@ -160,45 +154,29 @@ public:
 private:
 	struct FAlgonaSquadEntityRange
 	{
-		int32 FirstSoldierIndex = INDEX_NONE;
+		int32 FirstUnitIndex = INDEX_NONE;
 		int32 Count = 0;
 	};
 
 	bool IsSquadSpatialGridEnabled() const
 	{
-		return SpatialGridMode == EAlgonaSpatialGridMode::Squads
-			|| SpatialGridMode == EAlgonaSpatialGridMode::Both;
+		return AlgonaSimulationDefaults::EnableSquadSpatialGrid;
 	}
 
-	bool IsSoldierSpatialGridEnabled() const
-	{
-		return SpatialGridMode == EAlgonaSpatialGridMode::Soldiers
-			|| SpatialGridMode == EAlgonaSpatialGridMode::Both;
-	}
-	
 	void InitializeQueries();
 
-	bool CreateSoldiers(
-		int32 SoldierCount,
+	bool CreateUnits(
+		int32 UnitCount,
 		int32 RequestedSquadSize);
 	bool CreateSquads(int32 RequestedSquadSize);
-	void DestroySoldiers();
-
-	int32 ExportSoldierSnapshotsForSoldierIdsInternal(
-		TConstArrayView<uint32> SoldierIds,
-		TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
-		int32 MaxEntities,
-		bool bUseFilteredFullScan);
+	void DestroyUnits();
 
 	void RunSimulationStep(float DeltaTime);
 	void ProcessPendingMoveCommands();
-	bool UpdateSquadAnchors(
+	bool UpdateSquadAnchors(float DeltaTime);
+	int32 UpdateUnits(
 		float DeltaTime,
-		int32& OutSpatialCellChanges);
-	int32 UpdateSoldiers(
-		float DeltaTime,
-		int32& OutVisitedEntities,
-		int32& OutSpatialCellChanges);
+		int32& OutVisitedEntities);
 
 	FVector ComputeSlotWorldPosition(
 		const FAlgonaSquad& Squad,
@@ -221,30 +199,21 @@ private:
 	TObjectPtr<UMassSpawnerSubsystem> MassSpawnerSubsystem = nullptr;
 
 	UPROPERTY(Transient)
-	TObjectPtr<UMassEntityConfigAsset> SoldierEntityConfig = nullptr;
+	TObjectPtr<UMassEntityConfigAsset> UnitEntityConfig = nullptr;
 
-	TUniquePtr<FMassEntityQuery> SoldierUpdateQuery;
-	TUniquePtr<FMassEntityQuery> SoldierSnapshotQuery;
+	TUniquePtr<FMassEntityQuery> UnitUpdateQuery;
+	TUniquePtr<FMassEntityQuery> UnitSnapshotQuery;
 
+	// Kept dormant and empty while EnableSquadSpatialGrid is false.
 	FAlgonaSquadSpatialGrid SquadSpatialGrid{
 		AlgonaSimulationDefaults::SpatialGridCellSizeCm};
-	
-	FAlgonaSoldierSpatialGrid SoldierSpatialGrid{
+
+	// Active entity-level spatial index used by Presentation and future
+	// simulation systems that need individual combat-unit queries.
+	FAlgonaUnitSpatialGrid UnitSpatialGrid{
 		AlgonaSimulationDefaults::SpatialGridCellSizeCm};
 
-	EAlgonaSpatialGridMode SpatialGridMode =
-		EAlgonaSpatialGridMode::Squads;
-
-	bool bSpatialGridBenchmarkEnabled = false;
-
-	uint64 SpatialBenchmarkStepCount = 0;
-	double SpatialBenchmarkStepMillisecondsSum = 0.0;
-	double SpatialBenchmarkStepMillisecondsMax = 0.0;
-
-	uint64 SpatialBenchmarkSquadCellChanges = 0;
-	uint64 SpatialBenchmarkSoldierCellChanges = 0;
-	
-	TArray<FMassEntityHandle> SoldierEntities;
+	TArray<FMassEntityHandle> UnitEntities;
 	TArray<FAlgonaSquad> Squads;
 	TArray<FAlgonaSquadEntityRange> SquadEntityRanges;
 	TArray<FAlgonaSquadMoveCommand> PendingMoveCommands;

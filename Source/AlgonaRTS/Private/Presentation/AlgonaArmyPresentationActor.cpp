@@ -53,7 +53,7 @@ namespace
 	constexpr int32 NearAlphaPrimitiveDataIndex = 0;
 	constexpr int32 MediumAlphaPrimitiveDataIndex = 1;
 
-	// Current debug soldier height. When final representation types are added,
+	// Current debug unit height. When final representation types are added,
 	// this becomes a per-type value derived from their actual visual bounds.
 	constexpr double ReferenceUnitHeightCm = 170.0;
 
@@ -507,7 +507,7 @@ void AAlgonaArmyPresentationActor::Tick(float DeltaSeconds)
 		&& VisibilityRefreshElapsedSeconds >= VisibilityRefreshIntervalSeconds;
 
 	// Camera movement requires a new export only for the spatial path. The old
-	// full-export path reuses its cached all-soldier snapshot and only re-culls it.
+	// full-export path reuses its cached all-unit snapshot and only re-culls it.
 	const bool bNeedsSnapshotCapture =
 		bSimulationChanged
 		|| bCullingModeChanged
@@ -835,9 +835,8 @@ void AAlgonaArmyPresentationActor::RefreshPresentationWorkingSet(
 	const UCameraComponent* Camera = PresentationCamera.Get();
 	const bool bHasValidView =
 		World && Camera && View.Build(*World, *Camera);
-	const bool bUseLegacyPerSoldierCulling =
+	const bool bUsePerUnitCulling =
 		IsAlgonaP1PresentationCameraCullingEnabled()
-		&& !IsAlgonaP1SpatialSnapshotsEnabled()
 		&& bHasValidView;
 
 	ProjectedUnitHeightPixels =
@@ -850,9 +849,9 @@ void AAlgonaArmyPresentationActor::RefreshPresentationWorkingSet(
 	const FQuat MeshFacingCorrection =
 		FRotator(0.0f, -90.0f, 0.0f).Quaternion();
 
-	for (const FAlgonaSoldierSnapshot& Snapshot : CachedSnapshots)
+	for (const FAlgonaUnitSnapshot& Snapshot : CachedSnapshots)
 	{
-		if (bUseLegacyPerSoldierCulling
+		if (bUsePerUnitCulling
 			&& !View.IsGroundPointVisible(Snapshot.Position, CullingGuardPixels))
 		{
 			continue;
@@ -1247,7 +1246,6 @@ bool AAlgonaArmyPresentationActor::RebuildInstances()
 	}
 
 	AnimationIndicesScratch.Init(AnimationIndex, CurrentTransforms.Num());
-
 	FBox WorkingSetBounds(EForceInit::ForceInit);
 	for (int32 Index = 0; Index < CurrentTransforms.Num(); ++Index)
 	{

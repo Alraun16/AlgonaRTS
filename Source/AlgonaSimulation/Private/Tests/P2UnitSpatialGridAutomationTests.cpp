@@ -1,70 +1,70 @@
-﻿#include "Spatial/AlgonaSoldierSpatialGrid.h"
+#include "Spatial/AlgonaUnitSpatialGrid.h"
 
 #include "Misc/AutomationTest.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FAlgonaP2SoldierSpatialGridTest,
-	"Algona.P2.Spatial.SoldierUniformGrid",
+	FAlgonaP2UnitSpatialGridTest,
+	"Algona.P2.Spatial.UnitUniformGrid",
 	EAutomationTestFlags_ApplicationContextMask
 		| EAutomationTestFlags::SmokeFilter);
 
-bool FAlgonaP2SoldierSpatialGridTest::RunTest(
+bool FAlgonaP2UnitSpatialGridTest::RunTest(
 	const FString& Parameters)
 {
 	(void)Parameters;
 
-	FAlgonaSoldierSpatialGrid Grid(10000.0);
+	FAlgonaUnitSpatialGrid Grid(10000.0);
 
-	Grid.AddSoldier(
+	Grid.AddUnit(
 		1,
 		FVector(100.0, 100.0, 0.0));
 
-	Grid.AddSoldier(
+	Grid.AddUnit(
 		2,
 		FVector(10100.0, 100.0, 0.0));
 
-	Grid.AddSoldier(
+	Grid.AddUnit(
 		3,
 		FVector(200.0, 100.0, 0.0));
 
-	TArray<uint32> SoldierIds;
+	TArray<uint32> UnitIds;
 
-	Grid.QuerySoldierIds(
+	Grid.QueryUnitIds(
 		FVector2D(0.0, 0.0),
 		FVector2D(9999.0, 9999.0),
-		SoldierIds);
+		UnitIds);
 
-	SoldierIds.Sort();
+	UnitIds.Sort();
 
 	TestEqual(
-		TEXT("First cell initially contains two soldiers"),
-		SoldierIds.Num(),
+		TEXT("First cell initially contains two units"),
+		UnitIds.Num(),
 		2);
 
 	TestTrue(
-		TEXT("Soldier 1 crossed into another cell"),
-		Grid.UpdateSoldier(
+		TEXT("Unit 1 crossed into another cell"),
+		Grid.UpdateUnit(
 			1,
 			FVector(20100.0, 100.0, 0.0)));
 
-	// Soldier 3 was swapped inside the old cell when soldier 1 left.
+	// Unit 3 was swapped inside the old cell when unit 1 left.
 	// Moving it afterwards verifies that its stored slot was repaired.
 	TestTrue(
-		TEXT("Swapped soldier keeps a valid cell slot"),
-		Grid.UpdateSoldier(
+		TEXT("Swapped unit keeps a valid cell slot"),
+		Grid.UpdateUnit(
 			3,
 			FVector(10100.0, 200.0, 0.0)));
 
-	Grid.QuerySoldierIds(
+	Grid.QueryUnitIds(
 		FVector2D(0.0, 0.0),
 		FVector2D(9999.0, 9999.0),
-		SoldierIds);
+		UnitIds);
 
 	TestEqual(
 		TEXT("Original cell is empty"),
-		SoldierIds.Num(),
+		UnitIds.Num(),
 		0);
 
 	return true;

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Army/AlgonaSoldierSnapshot.h"
+#include "Army/AlgonaUnitSnapshot.h"
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
@@ -45,7 +45,7 @@ private:
 	UPROPERTY(EditAnywhere, Category = "Algona|Presentation")
 	FVector InstanceScale = FVector(1.0, 1.0, 1.0);
 
-	TArray<FAlgonaSoldierSnapshot> CachedSnapshots;
+	TArray<FAlgonaUnitSnapshot> CachedSnapshots;
 	TArray<uint32> PresentedEntityIds;
 	TArray<FTransform> PreviousTransforms;
 	TArray<FTransform> TargetTransforms;

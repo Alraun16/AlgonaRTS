@@ -32,12 +32,12 @@ AAlgonaLegacyIsmPresentationActor::AAlgonaLegacyIsmPresentationActor()
 	InstancedMeshComponent->SetGenerateOverlapEvents(false);
 	InstancedMeshComponent->SetCastShadow(false);
 
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> SoldierMesh(
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> UnitMesh(
 		TEXT("/Game/Archer.Archer"));
 
-	if (SoldierMesh.Succeeded())
+	if (UnitMesh.Succeeded())
 	{
-		InstancedMeshComponent->SetStaticMesh(SoldierMesh.Object);
+		InstancedMeshComponent->SetStaticMesh(UnitMesh.Object);
 	}
 }
 
@@ -190,9 +190,8 @@ void AAlgonaLegacyIsmPresentationActor::RefreshPresentationWorkingSet(
 	FAlgonaPresentationView View;
 	UWorld* World = GetWorld();
 	const UCameraComponent* Camera = PresentationCamera.Get();
-	const bool bUseLegacyPerSoldierCulling =
+	const bool bUsePerUnitCulling =
 		IsAlgonaP1PresentationCameraCullingEnabled()
-		&& !IsAlgonaP1SpatialSnapshotsEnabled()
 		&& World
 		&& Camera
 		&& View.Build(*World, *Camera);
@@ -200,9 +199,9 @@ void AAlgonaLegacyIsmPresentationActor::RefreshPresentationWorkingSet(
 	const FQuat MeshFacingCorrection =
 		FRotator(0.0f, -90.0f, 0.0f).Quaternion();
 
-	for (const FAlgonaSoldierSnapshot& Snapshot : CachedSnapshots)
+	for (const FAlgonaUnitSnapshot& Snapshot : CachedSnapshots)
 	{
-		if (bUseLegacyPerSoldierCulling
+		if (bUsePerUnitCulling
 			&& !View.IsGroundPointVisible(Snapshot.Position, CullingGuardPixels))
 		{
 			continue;

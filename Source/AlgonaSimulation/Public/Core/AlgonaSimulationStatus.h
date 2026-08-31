@@ -7,8 +7,8 @@ enum class EAlgonaSimulationStartupState : uint8
 	NotStarted,
 	Ready,
 	MissingMassServices,
-	SoldierTemplateBuildFailed,
-	SoldierSpawnFailed,
+	UnitTemplateBuildFailed,
+	UnitSpawnFailed,
 	SquadInitializationFailed
 };
 

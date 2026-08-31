@@ -1,17 +1,17 @@
-﻿#include "Spatial/AlgonaSoldierSpatialGrid.h"
+#include "Spatial/AlgonaUnitSpatialGrid.h"
 
 namespace
 {
 	constexpr double MinimumSpatialCellSizeCm = 1.0;
 }
 
-FAlgonaSoldierSpatialGrid::FAlgonaSoldierSpatialGrid(
+FAlgonaUnitSpatialGrid::FAlgonaUnitSpatialGrid(
 	double InCellSizeCm)
 {
 	Reset(InCellSizeCm);
 }
 
-void FAlgonaSoldierSpatialGrid::Reset(
+void FAlgonaUnitSpatialGrid::Reset(
 	double InCellSizeCm)
 {
 	CellSizeCm = FMath::Max(
@@ -19,10 +19,10 @@ void FAlgonaSoldierSpatialGrid::Reset(
 		MinimumSpatialCellSizeCm);
 
 	Cells.Reset();
-	SoldierEntries.Reset();
+	UnitEntries.Reset();
 }
 
-FIntPoint FAlgonaSoldierSpatialGrid::GetCellCoordinates(
+FIntPoint FAlgonaUnitSpatialGrid::GetCellCoordinates(
 	const FVector& WorldPosition) const
 {
 	return FIntPoint(
@@ -30,22 +30,30 @@ FIntPoint FAlgonaSoldierSpatialGrid::GetCellCoordinates(
 		FMath::FloorToInt(WorldPosition.Y / CellSizeCm));
 }
 
-void FAlgonaSoldierSpatialGrid::AddSoldier(
-	uint32 SoldierId,
+FVector2D FAlgonaUnitSpatialGrid::GetCellWorldMin(
+	const FIntPoint& Cell) const
+{
+	return FVector2D(
+		static_cast<double>(Cell.X) * CellSizeCm,
+		static_cast<double>(Cell.Y) * CellSizeCm);
+}
+
+void FAlgonaUnitSpatialGrid::AddUnit(
+	uint32 UnitId,
 	const FVector& WorldPosition)
 {
-	if (SoldierId == 0)
+	if (UnitId == 0)
 	{
 		return;
 	}
 
-	if (SoldierEntries.Num() <= static_cast<int32>(SoldierId))
+	if (UnitEntries.Num() <= static_cast<int32>(UnitId))
 	{
-		SoldierEntries.SetNum(
-			static_cast<int32>(SoldierId) + 1);
+		UnitEntries.SetNum(
+			static_cast<int32>(UnitId) + 1);
 	}
 
-	FSoldierEntry& Entry = SoldierEntries[SoldierId];
+	FUnitEntry& Entry = UnitEntries[UnitId];
 
 	if (Entry.IndexInCell != INDEX_NONE)
 	{
@@ -54,25 +62,25 @@ void FAlgonaSoldierSpatialGrid::AddSoldier(
 
 	Entry.Cell = GetCellCoordinates(WorldPosition);
 
-	TArray<uint32>& CellSoldiers =
+	TArray<uint32>& CellUnits =
 		Cells.FindOrAdd(Entry.Cell);
 
 	Entry.IndexInCell =
-		CellSoldiers.Add(SoldierId);
+		CellUnits.Add(UnitId);
 }
 
-bool FAlgonaSoldierSpatialGrid::UpdateSoldier(
-	uint32 SoldierId,
+bool FAlgonaUnitSpatialGrid::UpdateUnit(
+	uint32 UnitId,
 	const FVector& WorldPosition)
 {
-	if (SoldierId == 0
-		|| !SoldierEntries.IsValidIndex(
-			static_cast<int32>(SoldierId)))
+	if (UnitId == 0
+		|| !UnitEntries.IsValidIndex(
+			static_cast<int32>(UnitId)))
 	{
 		return false;
 	}
 
-	FSoldierEntry& Entry = SoldierEntries[SoldierId];
+	FUnitEntry& Entry = UnitEntries[UnitId];
 
 	if (Entry.IndexInCell == INDEX_NONE)
 	{
@@ -87,56 +95,56 @@ bool FAlgonaSoldierSpatialGrid::UpdateSoldier(
 		return false;
 	}
 
-	TArray<uint32>* OldCellSoldiers =
+	TArray<uint32>* OldCellUnits =
 		Cells.Find(Entry.Cell);
 
-	if (!OldCellSoldiers
-		|| !OldCellSoldiers->IsValidIndex(Entry.IndexInCell))
+	if (!OldCellUnits
+		|| !OldCellUnits->IsValidIndex(Entry.IndexInCell))
 	{
 		return false;
 	}
 
 	const int32 RemovedIndex = Entry.IndexInCell;
-	const int32 LastIndex = OldCellSoldiers->Num() - 1;
-	const uint32 SwappedSoldierId =
-		(*OldCellSoldiers)[LastIndex];
+	const int32 LastIndex = OldCellUnits->Num() - 1;
+	const uint32 SwappedUnitId =
+		(*OldCellUnits)[LastIndex];
 
-	OldCellSoldiers->RemoveAtSwap(
+	OldCellUnits->RemoveAtSwap(
 		RemovedIndex,
 		1,
 		EAllowShrinking::No);
 
 	if (RemovedIndex != LastIndex
-		&& SoldierEntries.IsValidIndex(
-			static_cast<int32>(SwappedSoldierId)))
+		&& UnitEntries.IsValidIndex(
+			static_cast<int32>(SwappedUnitId)))
 	{
-		SoldierEntries[SwappedSoldierId].IndexInCell =
+		UnitEntries[SwappedUnitId].IndexInCell =
 			RemovedIndex;
 	}
 
 	const FIntPoint OldCell = Entry.Cell;
 
-	if (OldCellSoldiers->IsEmpty())
+	if (OldCellUnits->IsEmpty())
 	{
 		Cells.Remove(OldCell);
 	}
 
-	TArray<uint32>& NewCellSoldiers =
+	TArray<uint32>& NewCellUnits =
 		Cells.FindOrAdd(NewCell);
 
 	Entry.Cell = NewCell;
 	Entry.IndexInCell =
-		NewCellSoldiers.Add(SoldierId);
+		NewCellUnits.Add(UnitId);
 
 	return true;
 }
 
-void FAlgonaSoldierSpatialGrid::QuerySoldierIds(
+void FAlgonaUnitSpatialGrid::QueryUnitIds(
 	const FVector2D& WorldMin,
 	const FVector2D& WorldMax,
-	TArray<uint32>& OutSoldierIds) const
+	TArray<uint32>& OutUnitIds) const
 {
-	OutSoldierIds.Reset();
+	OutUnitIds.Reset();
 
 	const FVector2D OrderedMin(
 		FMath::Min(WorldMin.X, WorldMax.X),
@@ -162,10 +170,10 @@ void FAlgonaSoldierSpatialGrid::QuerySoldierIds(
 			CellX <= MaxCell.X;
 			++CellX)
 		{
-			if (const TArray<uint32>* CellSoldiers =
+			if (const TArray<uint32>* CellUnits =
 				Cells.Find(FIntPoint(CellX, CellY)))
 			{
-				OutSoldierIds.Append(*CellSoldiers);
+				OutUnitIds.Append(*CellUnits);
 			}
 		}
 	}

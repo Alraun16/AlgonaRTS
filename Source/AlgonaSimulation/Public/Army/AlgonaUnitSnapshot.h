@@ -7,7 +7,7 @@
  * No Mass handle, renderer index, material, LOD or representation data leaks
  * across this boundary.
  */
-struct ALGONASIMULATION_API FAlgonaSoldierSnapshot
+struct ALGONASIMULATION_API FAlgonaUnitSnapshot
 {
 	uint32 EntityId = 0;
 	FVector Position = FVector::ZeroVector;

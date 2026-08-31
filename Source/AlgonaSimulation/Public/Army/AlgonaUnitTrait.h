@@ -3,11 +3,11 @@
 #include "CoreMinimal.h"
 #include "MassEntityTraitBase.h"
 
-#include "AlgonaSoldierTrait.generated.h"
+#include "AlgonaUnitTrait.generated.h"
 
-/** Adds only authoritative simulation data required by one soldier entity. */
+/** Adds only authoritative simulation data required by one unit entity. */
 UCLASS()
-class ALGONASIMULATION_API UAlgonaSoldierTrait : public UMassEntityTraitBase
+class ALGONASIMULATION_API UAlgonaUnitTrait : public UMassEntityTraitBase
 {
 	GENERATED_BODY()
 

@@ -20,7 +20,7 @@ namespace
 		1,
 		TEXT(
 			"1=build a camera-visible presentation working set, "
-			"0=present all exported soldiers. Intended for A/B tests."),
+			"0=present all exported units. Intended for A/B tests."),
 		ECVF_Default);
 }
 

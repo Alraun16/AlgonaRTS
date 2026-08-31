@@ -73,7 +73,7 @@ bool FAlgonaP1SpatialGridTest::RunTest(const FString& Parameters)
 	FAlgonaSquad Squad;
 	Squad.MemberCount = 50;
 	Squad.FormationWidth = 10;
-	Squad.SoldierSpacing = 100.0f;
+	Squad.UnitSpacing = 100.0f;
 	Squad.AnchorLocation = FVector(1000.0, 0.0, 0.0);
 	Squad.FacingDirection = FVector::ForwardVector;
 

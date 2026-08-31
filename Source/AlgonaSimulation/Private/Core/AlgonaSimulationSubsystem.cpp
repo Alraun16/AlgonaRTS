@@ -1,6 +1,6 @@
 #include "Core/AlgonaSimulationSubsystem.h"
 
-#include "Army/AlgonaSoldierFragments.h"
+#include "Army/AlgonaUnitFragments.h"
 
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
@@ -15,33 +15,16 @@
 namespace
 {
 	// Read when a world starts. Restart PIE after changing these values.
-	TAutoConsoleVariable<int32> CVarAlgonaP0SoldierCount(
-		TEXT("algona.P0.SoldierCount"),
-		AlgonaSimulationDefaults::SoldierCount,
-		TEXT("Number of authoritative Mass soldiers created at world begin play."),
+	TAutoConsoleVariable<int32> CVarAlgonaP0UnitCount(
+		TEXT("algona.P0.UnitCount"),
+		AlgonaSimulationDefaults::UnitCount,
+		TEXT("Number of authoritative Mass units created at world begin play."),
 		ECVF_Default);
 
 	TAutoConsoleVariable<int32> CVarAlgonaP0SquadSize(
 		TEXT("algona.P0.SquadSize"),
 		AlgonaSimulationDefaults::SquadSize,
-		TEXT("Requested number of soldiers in one P0/P1 squad."),
-		ECVF_Default);
-	
-	TAutoConsoleVariable<int32> CVarAlgonaP2SpatialGridMode(
-	TEXT("algona.P2.SpatialGridMode"),
-	1,
-	TEXT(
-		"Spatial grid mode. "
-		"0=none, 1=squads, 2=soldiers, 3=both. "
-		"Restart PIE after changing."),
-	ECVF_Default);
-
-	TAutoConsoleVariable<int32> CVarAlgonaP2SpatialGridBenchmark(
-		TEXT("algona.P2.SpatialGridBenchmark"),
-		0,
-		TEXT(
-			"1=print five-second Simulation spatial-grid benchmark windows. "
-			"0=disabled."),
+		TEXT("Requested number of units in one P0/P1 squad."),
 		ECVF_Default);
 }
 
@@ -93,22 +76,6 @@ void UAlgonaSimulationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	StateRevision = 0;
 	Metrics = FAlgonaSimulationMetrics();
 
-	SpatialGridMode =
-	static_cast<EAlgonaSpatialGridMode>(
-		FMath::Clamp(
-			CVarAlgonaP2SpatialGridMode.GetValueOnGameThread(),
-			0,
-			3));
-
-	bSpatialGridBenchmarkEnabled =
-		CVarAlgonaP2SpatialGridBenchmark.GetValueOnGameThread() != 0;
-
-	SpatialBenchmarkStepCount = 0;
-	SpatialBenchmarkStepMillisecondsSum = 0.0;
-	SpatialBenchmarkStepMillisecondsMax = 0.0;
-	SpatialBenchmarkSquadCellChanges = 0;
-	SpatialBenchmarkSoldierCellChanges = 0;
-	
 	if (!IsAuthoritativeSimulationWorld())
 	{
 		return;
@@ -121,8 +88,8 @@ void UAlgonaSimulationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		return;
 	}
 
-	const int32 SoldierCount = FMath::Clamp(
-		CVarAlgonaP0SoldierCount.GetValueOnGameThread(),
+	const int32 UnitCount = FMath::Clamp(
+		CVarAlgonaP0UnitCount.GetValueOnGameThread(),
 		1,
 		500000);
 
@@ -131,9 +98,9 @@ void UAlgonaSimulationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		1,
 		1000);
 
-	if (!CreateSoldiers(SoldierCount, SquadSize))
+	if (!CreateUnits(UnitCount, SquadSize))
 	{
-		DestroySoldiers();
+		DestroyUnits();
 		return;
 	}
 
@@ -141,24 +108,24 @@ void UAlgonaSimulationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	++StateRevision;
 
 	Metrics.StartupState = EAlgonaSimulationStartupState::Ready;
-	Metrics.EntityCount = SoldierEntities.Num();
+	Metrics.EntityCount = UnitEntities.Num();
 	Metrics.SquadCount = Squads.Num();
 }
 
 void UAlgonaSimulationSubsystem::Deinitialize()
 {
-	SoldierUpdateQuery.Reset();
-	SoldierSnapshotQuery.Reset();
+	UnitUpdateQuery.Reset();
+	UnitSnapshotQuery.Reset();
 
 	// During world teardown Mass can already be deinitialized, so do not call
-	// DestroySoldiers() here. The world owns and tears down the entity manager.
-	SoldierEntities.Reset();
+	// DestroyUnits() here. The world owns and tears down the entity manager.
+	UnitEntities.Reset();
 	Squads.Reset();
 	SquadEntityRanges.Reset();
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
-	SoldierSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
+	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	PendingMoveCommands.Reset();
-	SoldierEntityConfig = nullptr;
+	UnitEntityConfig = nullptr;
 
 	Metrics.EntityCount = 0;
 	Metrics.SquadCount = 0;
@@ -175,7 +142,7 @@ void UAlgonaSimulationSubsystem::Tick(float DeltaTime)
 	if (Metrics.StartupState != EAlgonaSimulationStartupState::Ready
 		|| !IsAuthoritativeSimulationWorld()
 		|| !MassEntitySubsystem
-		|| SoldierEntities.IsEmpty())
+		|| UnitEntities.IsEmpty())
 	{
 		return;
 	}
@@ -204,7 +171,7 @@ FAlgonaSimulationMetrics UAlgonaSimulationSubsystem::GetSimulationMetrics() cons
 {
 	FAlgonaSimulationMetrics Snapshot = Metrics;
 	Snapshot.SimulationTick = SimulationTick;
-	Snapshot.EntityCount = SoldierEntities.Num();
+	Snapshot.EntityCount = UnitEntities.Num();
 	Snapshot.SquadCount = Squads.Num();
 	Snapshot.BacklogSeconds = FixedStepAccumulator.GetBacklogSeconds();
 	Snapshot.OverloadedFrameCount =
@@ -212,8 +179,8 @@ FAlgonaSimulationMetrics UAlgonaSimulationSubsystem::GetSimulationMetrics() cons
 	return Snapshot;
 }
 
-int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshots(
-	TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
+int32 UAlgonaSimulationSubsystem::ExportUnitSnapshots(
+	TArray<FAlgonaUnitSnapshot>& OutSnapshots,
 	int32 MaxEntities)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_ExportSnapshots);
@@ -221,7 +188,7 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshots(
 	OutSnapshots.Reset();
 
 	if (!MassEntitySubsystem
-		|| !SoldierSnapshotQuery
+		|| !UnitSnapshotQuery
 		|| MaxEntities <= 0)
 	{
 		return 0;
@@ -229,7 +196,7 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshots(
 
 	const int32 SafeMaxEntities = FMath::Min(
 		MaxEntities,
-		SoldierEntities.Num());
+		UnitEntities.Num());
 
 	if (SafeMaxEntities <= 0)
 	{
@@ -243,12 +210,12 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshots(
 	FMassExecutionContext ExecutionContext =
 		EntityManager.CreateExecutionContext(0.0f);
 
-	SoldierSnapshotQuery->ForEachEntityChunk(
+	UnitSnapshotQuery->ForEachEntityChunk(
 		ExecutionContext,
 		[&OutSnapshots, SafeMaxEntities](FMassExecutionContext& Context)
 		{
-			const TConstArrayView<FAlgonaSoldierIdFragment> Ids =
-				Context.GetFragmentView<FAlgonaSoldierIdFragment>();
+			const TConstArrayView<FAlgonaUnitIdFragment> Ids =
+				Context.GetFragmentView<FAlgonaUnitIdFragment>();
 			const TConstArrayView<FTransformFragment> Transforms =
 				Context.GetFragmentView<FTransformFragment>();
 
@@ -260,7 +227,7 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshots(
 				const FTransform& Transform =
 					Transforms[Index].GetTransform();
 
-				FAlgonaSoldierSnapshot& Snapshot =
+				FAlgonaUnitSnapshot& Snapshot =
 					OutSnapshots.AddDefaulted_GetRef();
 				Snapshot.EntityId = Ids[Index].Value;
 				Snapshot.Position = Transform.GetLocation();
@@ -317,28 +284,28 @@ void UAlgonaSimulationSubsystem::InitializeQueries()
 	FMassEntityManager& EntityManager =
 		MassEntitySubsystem->GetMutableEntityManager();
 
-	SoldierUpdateQuery =
+	UnitUpdateQuery =
 		MakeUnique<FMassEntityQuery>(EntityManager.AsShared());
-	SoldierUpdateQuery->AddRequirement<FTransformFragment>(
+	UnitUpdateQuery->AddRequirement<FTransformFragment>(
 		EMassFragmentAccess::ReadWrite);
-	SoldierUpdateQuery->AddRequirement<FAlgonaSoldierIdFragment>(
-	EMassFragmentAccess::ReadOnly);
-	SoldierUpdateQuery->AddRequirement<FAlgonaSquadMemberFragment>(
+	UnitUpdateQuery->AddRequirement<FAlgonaUnitIdFragment>(
 		EMassFragmentAccess::ReadOnly);
-	SoldierUpdateQuery->AddRequirement<FAlgonaSoldierMovementFragment>(
+	UnitUpdateQuery->AddRequirement<FAlgonaSquadMemberFragment>(
+		EMassFragmentAccess::ReadOnly);
+	UnitUpdateQuery->AddRequirement<FAlgonaUnitMovementFragment>(
 		EMassFragmentAccess::ReadWrite);
-	SoldierUpdateQuery->AddTagRequirement<FAlgonaSoldierTag>(
+	UnitUpdateQuery->AddTagRequirement<FAlgonaUnitTag>(
 		EMassFragmentPresence::All);
 
-	SoldierSnapshotQuery =
+	UnitSnapshotQuery =
 		MakeUnique<FMassEntityQuery>(EntityManager.AsShared());
-	SoldierSnapshotQuery->AddRequirement<FAlgonaSoldierIdFragment>(
+	UnitSnapshotQuery->AddRequirement<FAlgonaUnitIdFragment>(
 		EMassFragmentAccess::ReadOnly);
-	SoldierSnapshotQuery->AddRequirement<FTransformFragment>(
+	UnitSnapshotQuery->AddRequirement<FTransformFragment>(
 		EMassFragmentAccess::ReadOnly);
-	SoldierSnapshotQuery->AddRequirement<FAlgonaSquadMemberFragment>(
+	UnitSnapshotQuery->AddRequirement<FAlgonaSquadMemberFragment>(
 		EMassFragmentAccess::ReadOnly);
-	SoldierSnapshotQuery->AddTagRequirement<FAlgonaSoldierTag>(
+	UnitSnapshotQuery->AddTagRequirement<FAlgonaUnitTag>(
 		EMassFragmentPresence::All);
 }
 

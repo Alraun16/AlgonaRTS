@@ -24,7 +24,7 @@ namespace
 	TAutoConsoleVariable<int32> CVarAlgonaP1DebugSpatialGrid(
 		TEXT("algona.P1.DebugSpatialGrid"),
 		0,
-		TEXT("Draw the squad spatial uniform grid and 2D cell coordinates. 0=off, 1=on."),
+		TEXT("Draw the active unit spatial grid and 2D cell coordinates. 0=off, 1=on."),
 		ECVF_Default);
 
 	TAutoConsoleVariable<int32> CVarAlgonaP1DebugSnapshotMetrics(
@@ -107,10 +107,10 @@ void UAlgonaPresentationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	{
 		return;
 	}
-	
+
 	AAlgonaPlayerController* PlayerController =
-	Cast<AAlgonaPlayerController>(
-		InWorld.GetFirstPlayerController());
+		Cast<AAlgonaPlayerController>(
+			InWorld.GetFirstPlayerController());
 
 	if (PlayerController)
 	{
@@ -258,7 +258,7 @@ void UAlgonaPresentationSubsystem::DrawSpatialGridDebug(
 					: (Metrics.bSpatialSnapshotsRequested ? TEXT("FULL fallback") : TEXT("FULL"));
 
 				TArray<FString> Lines;
-				Lines.Reserve(6);
+				Lines.Reserve(5);
 				Lines.Add(FString::Printf(
 					TEXT("Snapshots %s [%d]"),
 					ModeText,
@@ -272,27 +272,25 @@ void UAlgonaPresentationSubsystem::DrawSpatialGridDebug(
 					Metrics.LastExportMilliseconds,
 					Metrics.AverageExportMilliseconds));
 				Lines.Add(FString::Printf(
-					TEXT("Grid: %.3f ms   SquadTest: %.3f ms"),
+					TEXT("Grid: %.3f ms   ema %.3f"),
 					Metrics.LastGridQueryMilliseconds,
-					Metrics.LastSquadTestMilliseconds));
+					Metrics.AverageGridQueryMilliseconds));
+
 				if (Metrics.bSpatialPathUsed)
 				{
 					Lines.Add(FString::Printf(
-						TEXT("Squads V/C/T: %d / %d / %d"),
-						Metrics.VisibleSquadCount,
-						Metrics.CandidateSquadCount,
-						Metrics.TotalSquadCount));
+						TEXT("Units C/E/T: %d / %d / %d"),
+						Metrics.CandidateUnitCount,
+						Metrics.ExportedUnitCount,
+						Metrics.TotalUnitCount));
 				}
 				else
 				{
 					Lines.Add(FString::Printf(
-						TEXT("Squads V/C/T: - / - / %d"),
-						Metrics.TotalSquadCount));
+						TEXT("Units C/E/T: - / %d / %d"),
+						Metrics.ExportedUnitCount,
+						Metrics.TotalUnitCount));
 				}
-				Lines.Add(FString::Printf(
-					TEXT("Soldiers exported: %d / %d"),
-					Metrics.ExportedSoldierCount,
-					Metrics.TotalSoldierCount));
 
 				float LineHeight = 0.0f;
 				for (const FString& Line : Lines)
@@ -355,11 +353,11 @@ void UAlgonaPresentationSubsystem::DrawSpatialGridDebug(
 		return;
 	}
 
-	const FIntPoint MinCell = Simulation->GetSpatialGridCellCoordinates(
+	const FIntPoint MinCell = Simulation->GetUnitSpatialGridCellCoordinates(
 		FVector(ViewMin.X, ViewMin.Y, 0.0));
-	const FIntPoint MaxCell = Simulation->GetSpatialGridCellCoordinates(
+	const FIntPoint MaxCell = Simulation->GetUnitSpatialGridCellCoordinates(
 		FVector(ViewMax.X, ViewMax.Y, 0.0));
-	const double CellSize = Simulation->GetSpatialGridCellSizeCm();
+	const double CellSize = Simulation->GetUnitSpatialGridCellSizeCm();
 
 	if (CellSize <= 0.0)
 	{
@@ -417,7 +415,7 @@ void UAlgonaPresentationSubsystem::DrawSpatialGridDebug(
 		{
 			const FIntPoint Cell(CellX, CellY);
 			const FVector2D CellWorldMin =
-				Simulation->GetSpatialGridCellWorldMin(Cell);
+				Simulation->GetUnitSpatialGridCellWorldMin(Cell);
 			const double HalfCellSize = CellSize * 0.5;
 			const FVector2D ScreenCorner = ProjectToCanvas(
 				FVector(
