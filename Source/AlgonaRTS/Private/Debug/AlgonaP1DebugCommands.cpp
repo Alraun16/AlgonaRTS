@@ -76,9 +76,9 @@ namespace
 			Iterations);
 	}
 	
-	void BenchmarkSpatialSnapshotsCommand(
-	const TArray<FString>& Arguments,
-	UWorld* World)
+	void BenchmarkSoldierSnapshotCrossoverCommand(
+		const TArray<FString>& Arguments,
+		UWorld* World)
 	{
 		if (!World || Arguments.Num() < 3)
 		{
@@ -100,7 +100,7 @@ namespace
 			Arguments.Num() >= 4
 				? FMath::Max(
 					FCString::Atoi(*Arguments[3]),
-					1)
+					10)
 				: 100;
 
 		UAlgonaSimulationSubsystem* Simulation =
@@ -111,7 +111,7 @@ namespace
 			return;
 		}
 
-		Simulation->BenchmarkSpatialSnapshotPaths(
+		Simulation->BenchmarkSoldierSnapshotCrossover(
 			FVector2D(
 				CenterX - HalfExtent,
 				CenterY - HalfExtent),
@@ -137,14 +137,15 @@ namespace
 		&BenchmarkSpatialQueryCommand),
 	ECVF_Cheat);
 	
-	FAutoConsoleCommandWithWorldAndArgs GAlgonaP2BenchmarkSpatialSnapshotsCommand(
-	TEXT("algona.P2.BenchmarkSpatialSnapshots"),
-	TEXT(
-		"Compare full squad and soldier spatial snapshot paths: "
-		"CenterX CenterY HalfExtent [Iterations]."),
-	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
-		&BenchmarkSpatialSnapshotsCommand),
-	ECVF_Cheat);
+	FAutoConsoleCommandWithWorldAndArgs
+		GAlgonaP2BenchmarkSoldierSnapshotCrossoverCommand(
+		TEXT("algona.P2.BenchmarkSoldierSnapshotCrossover"),
+		TEXT(
+			"Find Direct vs FullScan soldier snapshot crossover: "
+			"CenterX CenterY HalfExtent [Iterations]."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
+			&BenchmarkSoldierSnapshotCrossoverCommand),
+		ECVF_Cheat);
 }
 
 #endif

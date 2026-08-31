@@ -4,6 +4,7 @@
 #include "Army/AlgonaSoldierTrait.h"
 
 #include "Engine/World.h"
+#include "HAL/PlatformTime.h"
 #include "Mass/EntityFragments.h"
 #include "MassEntityConfigAsset.h"
 #include "MassEntityManager.h"
@@ -13,6 +14,11 @@
 #include "MassEntityView.h"
 #include "MassSpawnerSubsystem.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
+
+DEFINE_LOG_CATEGORY_STATIC(
+	LogAlgonaSoldierSnapshotBenchmark,
+	Log,
+	All);
 
 bool UAlgonaSimulationSubsystem::CreateSoldiers(
 	int32 SoldierCount,
@@ -444,6 +450,42 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshotsForSoldierIds(
 	TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
 	int32 MaxEntities)
 {
+	const int32 SelectedSoldierCount =
+		FMath::Min(
+			SoldierIds.Num(),
+			FMath::Max(MaxEntities, 0));
+
+	if (SelectedSoldierCount <= 0
+		|| SoldierEntities.IsEmpty())
+	{
+		OutSnapshots.Reset();
+		return 0;
+	}
+
+	// Temporary value. The P2 crossover benchmark will replace it
+	// with the measured soldier-specific threshold.
+	constexpr int32 FullScanRatioNumerator = 3;
+	constexpr int32 FullScanRatioDenominator = 50;
+
+	const bool bUseFilteredFullScan =
+		static_cast<int64>(SelectedSoldierCount)
+			* FullScanRatioDenominator
+		>= static_cast<int64>(SoldierEntities.Num())
+			* FullScanRatioNumerator;
+
+	return ExportSoldierSnapshotsForSoldierIdsInternal(
+		SoldierIds,
+		OutSnapshots,
+		MaxEntities,
+		bUseFilteredFullScan);
+}
+
+int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshotsForSoldierIdsInternal(
+	TConstArrayView<uint32> SoldierIds,
+	TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
+	int32 MaxEntities,
+	bool bUseFilteredFullScan)
+{
 	TRACE_CPUPROFILER_EVENT_SCOPE(
 		AlgonaSimulation_ExportSelectedSoldierSnapshots);
 
@@ -471,16 +513,6 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshotsForSoldierIds(
 
 	FMassEntityManager& EntityManager =
 		MassEntitySubsystem->GetMutableEntityManager();
-
-	// Use the same crossover as the existing squad snapshot export.
-	constexpr int32 FullScanRatioNumerator = 3;
-	constexpr int32 FullScanRatioDenominator = 50;
-
-	const bool bUseFilteredFullScan =
-		static_cast<int64>(SelectedSoldierCount)
-			* FullScanRatioDenominator
-		>= static_cast<int64>(SoldierEntities.Num())
-			* FullScanRatioNumerator;
 
 	if (!bUseFilteredFullScan)
 	{
@@ -616,6 +648,329 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshotsForSoldierIds(
 
 	return OutSnapshots.Num();
 }
+
+#if !UE_BUILD_SHIPPING
+
+void UAlgonaSimulationSubsystem::BenchmarkSoldierSnapshotCrossover(
+	const FVector2D& WorldMin,
+	const FVector2D& WorldMax,
+	int32 Iterations)
+{
+	if (!IsSoldierSpatialGridEnabled()
+		|| SoldierEntities.IsEmpty())
+	{
+		UE_LOG(
+			LogAlgonaSoldierSnapshotBenchmark,
+			Warning,
+			TEXT(
+				"Soldier snapshot crossover benchmark requires "
+				"the soldier spatial grid."));
+
+		return;
+	}
+
+	TArray<uint32> CandidateSoldierIds;
+
+	SoldierSpatialGrid.QuerySoldierIds(
+		WorldMin,
+		WorldMax,
+		CandidateSoldierIds);
+
+	if (CandidateSoldierIds.IsEmpty())
+	{
+		UE_LOG(
+			LogAlgonaSoldierSnapshotBenchmark,
+			Warning,
+			TEXT("Soldier snapshot crossover benchmark found no soldiers."));
+
+		return;
+	}
+
+	const int32 SafeIterations =
+		FMath::Clamp(
+			Iterations,
+			10,
+			500);
+
+	TArray<FAlgonaSoldierSnapshot> DirectSnapshots;
+	TArray<FAlgonaSoldierSnapshot> FullScanSnapshots;
+
+	auto MeasureAtCount =
+		[
+			this,
+			&CandidateSoldierIds,
+			&DirectSnapshots,
+			&FullScanSnapshots,
+			SafeIterations
+		](
+			int32 TestCount,
+			double& OutDirectMicroseconds,
+			double& OutFullScanMicroseconds)
+		{
+			TestCount =
+				FMath::Clamp(
+					TestCount,
+					1,
+					CandidateSoldierIds.Num());
+
+			const TConstArrayView<uint32> TestSoldierIds(
+				CandidateSoldierIds.GetData(),
+				TestCount);
+
+			// Warm both paths so retained output-array capacity is not
+			// counted as an advantage for either strategy.
+			ExportSoldierSnapshotsForSoldierIdsInternal(
+				TestSoldierIds,
+				DirectSnapshots,
+				TestCount,
+				false);
+
+			ExportSoldierSnapshotsForSoldierIdsInternal(
+				TestSoldierIds,
+				FullScanSnapshots,
+				TestCount,
+				true);
+
+			double DirectSeconds = 0.0;
+			double FullScanSeconds = 0.0;
+
+			auto RunDirect =
+				[
+					this,
+					&TestSoldierIds,
+					&DirectSnapshots,
+					TestCount,
+					&DirectSeconds
+				]()
+				{
+					const double StartSeconds =
+						FPlatformTime::Seconds();
+
+					ExportSoldierSnapshotsForSoldierIdsInternal(
+						TestSoldierIds,
+						DirectSnapshots,
+						TestCount,
+						false);
+
+					DirectSeconds +=
+						FPlatformTime::Seconds() - StartSeconds;
+				};
+
+			auto RunFullScan =
+				[
+					this,
+					&TestSoldierIds,
+					&FullScanSnapshots,
+					TestCount,
+					&FullScanSeconds
+				]()
+				{
+					const double StartSeconds =
+						FPlatformTime::Seconds();
+
+					ExportSoldierSnapshotsForSoldierIdsInternal(
+						TestSoldierIds,
+						FullScanSnapshots,
+						TestCount,
+						true);
+
+					FullScanSeconds +=
+						FPlatformTime::Seconds() - StartSeconds;
+				};
+
+			for (int32 Iteration = 0;
+				Iteration < SafeIterations;
+				++Iteration)
+			{
+				if ((Iteration & 1) == 0)
+				{
+					RunDirect();
+					RunFullScan();
+				}
+				else
+				{
+					RunFullScan();
+					RunDirect();
+				}
+			}
+
+			const double MicrosecondsPerIteration =
+				1000000.0
+				/ static_cast<double>(SafeIterations);
+
+			OutDirectMicroseconds =
+				DirectSeconds * MicrosecondsPerIteration;
+
+			OutFullScanMicroseconds =
+				FullScanSeconds * MicrosecondsPerIteration;
+		};
+
+	auto LogProbe =
+		[
+			this
+		](
+			int32 Count,
+			double DirectMicroseconds,
+			double FullScanMicroseconds)
+		{
+			const double Percent =
+				SoldierEntities.IsEmpty()
+					? 0.0
+					: static_cast<double>(Count)
+						* 100.0
+						/ static_cast<double>(SoldierEntities.Num());
+
+			UE_LOG(
+				LogAlgonaSoldierSnapshotBenchmark,
+				Display,
+				TEXT(
+					"Crossover probe | Count=%d | %.3f%% | "
+					"Direct=%.3f us | FullScan=%.3f us | Winner=%s"),
+				Count,
+				Percent,
+				DirectMicroseconds,
+				FullScanMicroseconds,
+				FullScanMicroseconds <= DirectMicroseconds
+					? TEXT("FullScan")
+					: TEXT("Direct"));
+		};
+
+	int32 LowCount = 1;
+	int32 HighCount = CandidateSoldierIds.Num();
+
+	double LowDirectMicroseconds = 0.0;
+	double LowFullScanMicroseconds = 0.0;
+	double HighDirectMicroseconds = 0.0;
+	double HighFullScanMicroseconds = 0.0;
+
+	MeasureAtCount(
+		LowCount,
+		LowDirectMicroseconds,
+		LowFullScanMicroseconds);
+
+	LogProbe(
+		LowCount,
+		LowDirectMicroseconds,
+		LowFullScanMicroseconds);
+
+	if (HighCount != LowCount)
+	{
+		MeasureAtCount(
+			HighCount,
+			HighDirectMicroseconds,
+			HighFullScanMicroseconds);
+
+		LogProbe(
+			HighCount,
+			HighDirectMicroseconds,
+			HighFullScanMicroseconds);
+	}
+	else
+	{
+		HighDirectMicroseconds = LowDirectMicroseconds;
+		HighFullScanMicroseconds = LowFullScanMicroseconds;
+	}
+
+	if (LowFullScanMicroseconds <= LowDirectMicroseconds)
+	{
+		UE_LOG(
+			LogAlgonaSoldierSnapshotBenchmark,
+			Display,
+			TEXT(
+				"Crossover result | Soldiers=%d | "
+				"FullScan already wins at Count=1."),
+			SoldierEntities.Num());
+
+		return;
+	}
+
+	if (HighDirectMicroseconds < HighFullScanMicroseconds)
+	{
+		UE_LOG(
+			LogAlgonaSoldierSnapshotBenchmark,
+			Display,
+			TEXT(
+				"Crossover result | Soldiers=%d | Candidates=%d | "
+				"No crossover found: Direct still wins at the "
+				"largest tested selection."),
+			SoldierEntities.Num(),
+			CandidateSoldierIds.Num());
+
+		return;
+	}
+
+	const int32 StopWidth =
+		FMath::Max(
+			1,
+			SoldierEntities.Num() / 1000);
+
+	while (HighCount - LowCount > StopWidth)
+	{
+		const int32 MidCount =
+			LowCount + (HighCount - LowCount) / 2;
+
+		double MidDirectMicroseconds = 0.0;
+		double MidFullScanMicroseconds = 0.0;
+
+		MeasureAtCount(
+			MidCount,
+			MidDirectMicroseconds,
+			MidFullScanMicroseconds);
+
+		LogProbe(
+			MidCount,
+			MidDirectMicroseconds,
+			MidFullScanMicroseconds);
+
+		if (MidFullScanMicroseconds <= MidDirectMicroseconds)
+		{
+			HighCount = MidCount;
+			HighDirectMicroseconds = MidDirectMicroseconds;
+			HighFullScanMicroseconds = MidFullScanMicroseconds;
+		}
+		else
+		{
+			LowCount = MidCount;
+			LowDirectMicroseconds = MidDirectMicroseconds;
+			LowFullScanMicroseconds = MidFullScanMicroseconds;
+		}
+	}
+
+	const double LowPercent =
+		static_cast<double>(LowCount)
+		* 100.0
+		/ static_cast<double>(SoldierEntities.Num());
+
+	const double HighPercent =
+		static_cast<double>(HighCount)
+		* 100.0
+		/ static_cast<double>(SoldierEntities.Num());
+
+	UE_LOG(
+		LogAlgonaSoldierSnapshotBenchmark,
+		Display,
+		TEXT(
+			"Crossover result | Soldiers=%d | Candidates=%d | "
+			"Direct wins through %d (%.3f%%): "
+			"Direct=%.3f us FullScan=%.3f us | "
+			"FullScan wins from %d (%.3f%%): "
+			"Direct=%.3f us FullScan=%.3f us | "
+			"SuggestedThreshold=%d (%.3f%%)"),
+		SoldierEntities.Num(),
+		CandidateSoldierIds.Num(),
+		LowCount,
+		LowPercent,
+		LowDirectMicroseconds,
+		LowFullScanMicroseconds,
+		HighCount,
+		HighPercent,
+		HighDirectMicroseconds,
+		HighFullScanMicroseconds,
+		HighCount,
+		HighPercent);
+}
+
+#endif
 
 FVector UAlgonaSimulationSubsystem::ComputeSlotWorldPosition(
 	const FAlgonaSquad& Squad,

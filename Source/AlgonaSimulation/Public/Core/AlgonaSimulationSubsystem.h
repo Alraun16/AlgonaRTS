@@ -145,7 +145,7 @@ public:
 		const FVector2D& WorldMax,
 		int32 Iterations) const;
 
-	void BenchmarkSpatialSnapshotPaths(
+	void BenchmarkSoldierSnapshotCrossover(
 		const FVector2D& WorldMin,
 		const FVector2D& WorldMax,
 		int32 Iterations);
@@ -183,6 +183,12 @@ private:
 		int32 RequestedSquadSize);
 	bool CreateSquads(int32 RequestedSquadSize);
 	void DestroySoldiers();
+
+	int32 ExportSoldierSnapshotsForSoldierIdsInternal(
+		TConstArrayView<uint32> SoldierIds,
+		TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
+		int32 MaxEntities,
+		bool bUseFilteredFullScan);
 
 	void RunSimulationStep(float DeltaTime);
 	void ProcessPendingMoveCommands();
