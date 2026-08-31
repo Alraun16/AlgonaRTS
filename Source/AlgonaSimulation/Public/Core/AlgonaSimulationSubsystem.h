@@ -5,6 +5,7 @@
 #include "Army/AlgonaSoldierSnapshot.h"
 #include "Army/AlgonaSquad.h"
 #include "Spatial/AlgonaSquadSpatialGrid.h"
+#include "Spatial/AlgonaSoldierSpatialGrid.h"
 #include "Spatial/AlgonaSquadSpatialSnapshot.h"
 
 #include "CoreMinimal.h"
@@ -24,7 +25,7 @@ namespace AlgonaSimulationDefaults
 	inline constexpr int32 MaxStepsPerFrame = 5;
 	inline constexpr int32 SoldierCount = 20000;
 	inline constexpr int32 SquadSize = 50;
-	inline constexpr double SpatialGridCellSizeCm = 5000.0;
+	inline constexpr double SpatialGridCellSizeCm = 10000.0;
 }
 
 /** Command consumed at the beginning of the next authoritative fixed step. */
@@ -32,6 +33,15 @@ struct FAlgonaSquadMoveCommand
 {
 	int32 SquadId = INDEX_NONE;
 	FVector TargetLocation = FVector::ZeroVector;
+};
+
+
+enum class EAlgonaSpatialGridMode : uint8
+{
+	None = 0,
+	Squads = 1,
+	Soldiers = 2,
+	Both = 3
 };
 
 /**
@@ -123,7 +133,24 @@ public:
 		TConstArrayView<int32> SquadIds,
 		TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
 		int32 MaxEntities);
+	
+	int32 ExportSoldierSnapshotsForSoldierIds(
+	TConstArrayView<uint32> SoldierIds,
+	TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
+	int32 MaxEntities);
+	
+#if !UE_BUILD_SHIPPING
+	void BenchmarkSpatialGridQueries(
+		const FVector2D& WorldMin,
+		const FVector2D& WorldMax,
+		int32 Iterations) const;
 
+	void BenchmarkSpatialSnapshotPaths(
+		const FVector2D& WorldMin,
+		const FVector2D& WorldMax,
+		int32 Iterations);
+#endif
+	
 	bool SubmitMoveSquadCommand(
 		int32 SquadId,
 		const FVector& TargetLocation);
@@ -137,6 +164,18 @@ private:
 		int32 Count = 0;
 	};
 
+	bool IsSquadSpatialGridEnabled() const
+	{
+		return SpatialGridMode == EAlgonaSpatialGridMode::Squads
+			|| SpatialGridMode == EAlgonaSpatialGridMode::Both;
+	}
+
+	bool IsSoldierSpatialGridEnabled() const
+	{
+		return SpatialGridMode == EAlgonaSpatialGridMode::Soldiers
+			|| SpatialGridMode == EAlgonaSpatialGridMode::Both;
+	}
+	
 	void InitializeQueries();
 
 	bool CreateSoldiers(
@@ -147,10 +186,13 @@ private:
 
 	void RunSimulationStep(float DeltaTime);
 	void ProcessPendingMoveCommands();
-	bool UpdateSquadAnchors(float DeltaTime);
+	bool UpdateSquadAnchors(
+		float DeltaTime,
+		int32& OutSpatialCellChanges);
 	int32 UpdateSoldiers(
 		float DeltaTime,
-		int32& OutVisitedEntities);
+		int32& OutVisitedEntities,
+		int32& OutSpatialCellChanges);
 
 	FVector ComputeSlotWorldPosition(
 		const FAlgonaSquad& Squad,
@@ -180,7 +222,22 @@ private:
 
 	FAlgonaSquadSpatialGrid SquadSpatialGrid{
 		AlgonaSimulationDefaults::SpatialGridCellSizeCm};
+	
+	FAlgonaSoldierSpatialGrid SoldierSpatialGrid{
+		AlgonaSimulationDefaults::SpatialGridCellSizeCm};
 
+	EAlgonaSpatialGridMode SpatialGridMode =
+		EAlgonaSpatialGridMode::Squads;
+
+	bool bSpatialGridBenchmarkEnabled = false;
+
+	uint64 SpatialBenchmarkStepCount = 0;
+	double SpatialBenchmarkStepMillisecondsSum = 0.0;
+	double SpatialBenchmarkStepMillisecondsMax = 0.0;
+
+	uint64 SpatialBenchmarkSquadCellChanges = 0;
+	uint64 SpatialBenchmarkSoldierCellChanges = 0;
+	
 	TArray<FMassEntityHandle> SoldierEntities;
 	TArray<FAlgonaSquad> Squads;
 	TArray<FAlgonaSquadEntityRange> SquadEntityRanges;

@@ -69,20 +69,26 @@ void FAlgonaSquadSpatialGrid::RemoveSquad(
 	}
 }
 
-void FAlgonaSquadSpatialGrid::UpdateSquad(
+bool FAlgonaSquadSpatialGrid::UpdateSquad(
 	int32 SquadId,
 	const FVector& OldCenter,
 	const FVector& NewCenter)
 {
-	const FIntPoint OldCell = GetCellCoordinates(OldCenter);
-	const FIntPoint NewCell = GetCellCoordinates(NewCenter);
+	const FIntPoint OldCell =
+		GetCellCoordinates(OldCenter);
+
+	const FIntPoint NewCell =
+		GetCellCoordinates(NewCenter);
+
 	if (OldCell == NewCell)
 	{
-		return;
+		return false;
 	}
 
 	RemoveSquad(SquadId, OldCenter);
 	AddSquad(SquadId, NewCenter);
+
+	return true;
 }
 
 void FAlgonaSquadSpatialGrid::QuerySquadIds(

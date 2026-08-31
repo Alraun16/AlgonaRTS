@@ -26,6 +26,23 @@ namespace
 		AlgonaSimulationDefaults::SquadSize,
 		TEXT("Requested number of soldiers in one P0/P1 squad."),
 		ECVF_Default);
+	
+	TAutoConsoleVariable<int32> CVarAlgonaP2SpatialGridMode(
+	TEXT("algona.P2.SpatialGridMode"),
+	1,
+	TEXT(
+		"Spatial grid mode. "
+		"0=none, 1=squads, 2=soldiers, 3=both. "
+		"Restart PIE after changing."),
+	ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarAlgonaP2SpatialGridBenchmark(
+		TEXT("algona.P2.SpatialGridBenchmark"),
+		0,
+		TEXT(
+			"1=print five-second Simulation spatial-grid benchmark windows. "
+			"0=disabled."),
+		ECVF_Default);
 }
 
 bool UAlgonaSimulationSubsystem::ShouldCreateSubsystem(UObject* Outer) const
@@ -76,6 +93,22 @@ void UAlgonaSimulationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	StateRevision = 0;
 	Metrics = FAlgonaSimulationMetrics();
 
+	SpatialGridMode =
+	static_cast<EAlgonaSpatialGridMode>(
+		FMath::Clamp(
+			CVarAlgonaP2SpatialGridMode.GetValueOnGameThread(),
+			0,
+			3));
+
+	bSpatialGridBenchmarkEnabled =
+		CVarAlgonaP2SpatialGridBenchmark.GetValueOnGameThread() != 0;
+
+	SpatialBenchmarkStepCount = 0;
+	SpatialBenchmarkStepMillisecondsSum = 0.0;
+	SpatialBenchmarkStepMillisecondsMax = 0.0;
+	SpatialBenchmarkSquadCellChanges = 0;
+	SpatialBenchmarkSoldierCellChanges = 0;
+	
 	if (!IsAuthoritativeSimulationWorld())
 	{
 		return;
@@ -123,6 +156,7 @@ void UAlgonaSimulationSubsystem::Deinitialize()
 	Squads.Reset();
 	SquadEntityRanges.Reset();
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
+	SoldierSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	PendingMoveCommands.Reset();
 	SoldierEntityConfig = nullptr;
 
@@ -287,6 +321,8 @@ void UAlgonaSimulationSubsystem::InitializeQueries()
 		MakeUnique<FMassEntityQuery>(EntityManager.AsShared());
 	SoldierUpdateQuery->AddRequirement<FTransformFragment>(
 		EMassFragmentAccess::ReadWrite);
+	SoldierUpdateQuery->AddRequirement<FAlgonaSoldierIdFragment>(
+	EMassFragmentAccess::ReadOnly);
 	SoldierUpdateQuery->AddRequirement<FAlgonaSquadMemberFragment>(
 		EMassFragmentAccess::ReadOnly);
 	SoldierUpdateQuery->AddRequirement<FAlgonaSoldierMovementFragment>(

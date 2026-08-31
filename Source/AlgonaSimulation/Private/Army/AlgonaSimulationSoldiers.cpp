@@ -124,6 +124,7 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 	SquadEntityRanges.Reset();
 	SquadEntityRanges.Reserve(SquadCount);
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
+	SoldierSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 
 	int32 SoldierIndex = 0;
 
@@ -195,7 +196,14 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 			FTransformFragment& Transform =
 				EntityView.GetFragmentData<FTransformFragment>();
 			Transform.SetTransform(InitialTransform);
-
+			
+			if (IsSoldierSpatialGridEnabled())
+			{
+				SoldierSpatialGrid.AddSoldier(
+					Id.Value,
+					InitialTransform.GetLocation());
+			}
+			
 			++SoldierIndex;
 		}
 
@@ -206,9 +214,12 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 		EntityRange.FirstSoldierIndex = FirstSoldierIndex;
 		EntityRange.Count = Squads.Last().MemberCount;
 
-		SquadSpatialGrid.AddSquad(
-			Squads.Last().SquadId,
-			Squads.Last().GetSpatialCenter());
+		if (IsSquadSpatialGridEnabled())
+		{
+			SquadSpatialGrid.AddSquad(
+				Squads.Last().SquadId,
+				Squads.Last().GetSpatialCenter());
+		}
 	}
 
 	return SoldierIndex == SoldierEntities.Num()
@@ -228,6 +239,7 @@ void UAlgonaSimulationSubsystem::DestroySoldiers()
 	Squads.Reset();
 	SquadEntityRanges.Reset();
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
+	SoldierSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	PendingMoveCommands.Reset();
 	SoldierEntityConfig = nullptr;
 
@@ -419,6 +431,184 @@ int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshotsForSquads(
 				FAlgonaSoldierSnapshot& Snapshot =
 					OutSnapshots.AddDefaulted_GetRef();
 				Snapshot.EntityId = Ids[Index].Value;
+				Snapshot.Position = Transform.GetLocation();
+				Snapshot.Facing = Transform.GetRotation();
+			}
+		});
+
+	return OutSnapshots.Num();
+}
+
+int32 UAlgonaSimulationSubsystem::ExportSoldierSnapshotsForSoldierIds(
+	TConstArrayView<uint32> SoldierIds,
+	TArray<FAlgonaSoldierSnapshot>& OutSnapshots,
+	int32 MaxEntities)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(
+		AlgonaSimulation_ExportSelectedSoldierSnapshots);
+
+	OutSnapshots.Reset();
+
+	if (!MassEntitySubsystem
+		|| !SoldierSnapshotQuery
+		|| SoldierIds.IsEmpty()
+		|| MaxEntities <= 0)
+	{
+		return 0;
+	}
+
+	const int32 SelectedSoldierCount =
+		FMath::Min(
+			SoldierIds.Num(),
+			MaxEntities);
+
+	if (SelectedSoldierCount <= 0)
+	{
+		return 0;
+	}
+
+	OutSnapshots.Reserve(SelectedSoldierCount);
+
+	FMassEntityManager& EntityManager =
+		MassEntitySubsystem->GetMutableEntityManager();
+
+	// Use the same crossover as the existing squad snapshot export.
+	constexpr int32 FullScanRatioNumerator = 3;
+	constexpr int32 FullScanRatioDenominator = 50;
+
+	const bool bUseFilteredFullScan =
+		static_cast<int64>(SelectedSoldierCount)
+			* FullScanRatioDenominator
+		>= static_cast<int64>(SoldierEntities.Num())
+			* FullScanRatioNumerator;
+
+	if (!bUseFilteredFullScan)
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(
+			AlgonaSimulation_ExportSelectedSoldiers_Direct);
+
+		for (int32 Index = 0;
+			Index < SelectedSoldierCount;
+			++Index)
+		{
+			const uint32 SoldierId =
+				SoldierIds[Index];
+
+			if (SoldierId == 0)
+			{
+				continue;
+			}
+
+			const int32 SoldierIndex =
+				static_cast<int32>(SoldierId - 1);
+
+			if (!SoldierEntities.IsValidIndex(SoldierIndex))
+			{
+				continue;
+			}
+
+			const FMassEntityHandle Entity =
+				SoldierEntities[SoldierIndex];
+
+			if (!EntityManager.IsEntityValid(Entity))
+			{
+				continue;
+			}
+
+			FMassEntityView EntityView(
+				EntityManager,
+				Entity);
+
+			const FTransformFragment& TransformFragment =
+				EntityView.GetFragmentData<FTransformFragment>();
+
+			const FTransform& Transform =
+				TransformFragment.GetTransform();
+
+			FAlgonaSoldierSnapshot& Snapshot =
+				OutSnapshots.AddDefaulted_GetRef();
+
+			Snapshot.EntityId = SoldierId;
+			Snapshot.Position = Transform.GetLocation();
+			Snapshot.Facing = Transform.GetRotation();
+		}
+
+		return OutSnapshots.Num();
+	}
+
+	TRACE_CPUPROFILER_EVENT_SCOPE(
+		AlgonaSimulation_ExportSelectedSoldiers_FilteredFullScan);
+
+	TArray<uint8> SelectedSoldierMask;
+	SelectedSoldierMask.Init(
+		0,
+		SoldierEntities.Num());
+
+	for (int32 Index = 0;
+		Index < SelectedSoldierCount;
+		++Index)
+	{
+		const uint32 SoldierId =
+			SoldierIds[Index];
+
+		if (SoldierId == 0)
+		{
+			continue;
+		}
+
+		const int32 SoldierIndex =
+			static_cast<int32>(SoldierId - 1);
+
+		if (SelectedSoldierMask.IsValidIndex(SoldierIndex))
+		{
+			SelectedSoldierMask[SoldierIndex] = 1;
+		}
+	}
+
+	FMassExecutionContext ExecutionContext =
+		EntityManager.CreateExecutionContext(0.0f);
+
+	SoldierSnapshotQuery->ForEachEntityChunk(
+		ExecutionContext,
+		[
+			&OutSnapshots,
+			&SelectedSoldierMask
+		](FMassExecutionContext& Context)
+		{
+			const TConstArrayView<FAlgonaSoldierIdFragment> Ids =
+				Context.GetFragmentView<FAlgonaSoldierIdFragment>();
+
+			const TConstArrayView<FTransformFragment> Transforms =
+				Context.GetFragmentView<FTransformFragment>();
+
+			for (int32 Index = 0;
+				Index < Context.GetNumEntities();
+				++Index)
+			{
+				const uint32 SoldierId =
+					Ids[Index].Value;
+
+				if (SoldierId == 0)
+				{
+					continue;
+				}
+
+				const int32 SoldierIndex =
+					static_cast<int32>(SoldierId - 1);
+
+				if (!SelectedSoldierMask.IsValidIndex(SoldierIndex)
+					|| SelectedSoldierMask[SoldierIndex] == 0)
+				{
+					continue;
+				}
+
+				const FTransform& Transform =
+					Transforms[Index].GetTransform();
+
+				FAlgonaSoldierSnapshot& Snapshot =
+					OutSnapshots.AddDefaulted_GetRef();
+
+				Snapshot.EntityId = SoldierId;
 				Snapshot.Position = Transform.GetLocation();
 				Snapshot.Facing = Transform.GetRotation();
 			}

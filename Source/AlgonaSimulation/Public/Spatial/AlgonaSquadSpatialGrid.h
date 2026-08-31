@@ -25,7 +25,7 @@ public:
 
 	void AddSquad(int32 SquadId, const FVector& Center);
 	void RemoveSquad(int32 SquadId, const FVector& Center);
-	void UpdateSquad(
+	bool UpdateSquad(
 		int32 SquadId,
 		const FVector& OldCenter,
 		const FVector& NewCenter);

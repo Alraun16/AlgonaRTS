@@ -9,33 +9,139 @@
 #include "MassExecutionContext.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
-void UAlgonaSimulationSubsystem::RunSimulationStep(float DeltaTime)
+DEFINE_LOG_CATEGORY_STATIC(
+	LogAlgonaSpatialGridBenchmark,
+	Log,
+	All);
+
+namespace
+{
+	constexpr uint64 SpatialBenchmarkWindowSteps = 200;
+
+	const TCHAR* GetSpatialGridModeName(
+		EAlgonaSpatialGridMode Mode)
+	{
+		switch (Mode)
+		{
+		case EAlgonaSpatialGridMode::None:
+			return TEXT("None");
+
+		case EAlgonaSpatialGridMode::Squads:
+			return TEXT("Squads");
+
+		case EAlgonaSpatialGridMode::Soldiers:
+			return TEXT("Soldiers");
+
+		case EAlgonaSpatialGridMode::Both:
+			return TEXT("Both");
+		}
+
+		return TEXT("Unknown");
+	}
+}
+
+void UAlgonaSimulationSubsystem::RunSimulationStep(
+	float DeltaTime)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_FixedStep);
-	const double StartSeconds = FPlatformTime::Seconds();
+
+	const double StartSeconds =
+		FPlatformTime::Seconds();
 
 	++SimulationTick;
+
 	ProcessPendingMoveCommands();
 
-	const bool bSquadAnchorsChanged = UpdateSquadAnchors(DeltaTime);
+	int32 SquadSpatialCellChanges = 0;
+
+	const bool bSquadAnchorsChanged =
+		UpdateSquadAnchors(
+			DeltaTime,
+			SquadSpatialCellChanges);
 
 	int32 VisitedEntities = 0;
-	const int32 MovedEntities = UpdateSoldiers(DeltaTime, VisitedEntities);
+	int32 SoldierSpatialCellChanges = 0;
 
-	// Snapshots currently expose transforms only, so Presentation revision
-	// changes only when an authoritative transform may have changed.
+	const int32 MovedEntities =
+		UpdateSoldiers(
+			DeltaTime,
+			VisitedEntities,
+			SoldierSpatialCellChanges);
+
 	if (bSquadAnchorsChanged || MovedEntities > 0)
 	{
 		++StateRevision;
 	}
+
+	const double StepMilliseconds =
+		(FPlatformTime::Seconds() - StartSeconds) * 1000.0;
 
 	Metrics.SimulationTick = SimulationTick;
 	Metrics.EntityCount = SoldierEntities.Num();
 	Metrics.SquadCount = Squads.Num();
 	Metrics.LastVisitedEntities = VisitedEntities;
 	Metrics.LastMovedEntities = MovedEntities;
-	Metrics.LastStepMilliseconds =
-		(FPlatformTime::Seconds() - StartSeconds) * 1000.0;
+	Metrics.LastStepMilliseconds = StepMilliseconds;
+
+	if (!bSpatialGridBenchmarkEnabled)
+	{
+		return;
+	}
+
+	++SpatialBenchmarkStepCount;
+
+	SpatialBenchmarkStepMillisecondsSum +=
+		StepMilliseconds;
+
+	SpatialBenchmarkStepMillisecondsMax =
+		FMath::Max(
+			SpatialBenchmarkStepMillisecondsMax,
+			StepMilliseconds);
+
+	SpatialBenchmarkSquadCellChanges +=
+		static_cast<uint64>(SquadSpatialCellChanges);
+
+	SpatialBenchmarkSoldierCellChanges +=
+		static_cast<uint64>(SoldierSpatialCellChanges);
+
+	if (SpatialBenchmarkStepCount < SpatialBenchmarkWindowSteps)
+	{
+		return;
+	}
+
+	const double AverageStepMilliseconds =
+		SpatialBenchmarkStepMillisecondsSum
+		/ static_cast<double>(SpatialBenchmarkStepCount);
+
+	const double AverageSquadCellChanges =
+		static_cast<double>(SpatialBenchmarkSquadCellChanges)
+		/ static_cast<double>(SpatialBenchmarkStepCount);
+
+	const double AverageSoldierCellChanges =
+		static_cast<double>(SpatialBenchmarkSoldierCellChanges)
+		/ static_cast<double>(SpatialBenchmarkStepCount);
+
+	UE_LOG(
+		LogAlgonaSpatialGridBenchmark,
+		Display,
+		TEXT(
+			"Grid benchmark | Mode=%s | Soldiers=%d | Squads=%d | "
+			"Cell=%.0f cm | AvgStep=%.3f ms | MaxStep=%.3f ms | "
+			"SquadCellChanges=%.1f/step | SoldierCellChanges=%.1f/step"),
+		GetSpatialGridModeName(SpatialGridMode),
+		SoldierEntities.Num(),
+		Squads.Num(),
+		AlgonaSimulationDefaults::SpatialGridCellSizeCm,
+		AverageStepMilliseconds,
+		SpatialBenchmarkStepMillisecondsMax,
+		AverageSquadCellChanges,
+		AverageSoldierCellChanges);
+
+	SpatialBenchmarkStepCount = 0;
+	SpatialBenchmarkStepMillisecondsSum = 0.0;
+	SpatialBenchmarkStepMillisecondsMax = 0.0;
+	SpatialBenchmarkSquadCellChanges = 0;
+	SpatialBenchmarkSoldierCellChanges = 0;
 }
 
 void UAlgonaSimulationSubsystem::ProcessPendingMoveCommands()
@@ -57,8 +163,15 @@ void UAlgonaSimulationSubsystem::ProcessPendingMoveCommands()
 	PendingMoveCommands.Reset();
 }
 
-bool UAlgonaSimulationSubsystem::UpdateSquadAnchors(float DeltaTime)
+bool UAlgonaSimulationSubsystem::UpdateSquadAnchors(
+	float DeltaTime,
+	int32& OutSpatialCellChanges)
 {
+	OutSpatialCellChanges = 0;
+
+	const bool bUpdateSpatialGrid =
+		IsSquadSpatialGridEnabled();
+
 	bool bAnyAnchorChanged = false;
 
 	for (FAlgonaSquad& Squad : Squads)
@@ -82,10 +195,14 @@ bool UAlgonaSimulationSubsystem::UpdateSquadAnchors(float DeltaTime)
 			Squad.AnchorLocation = Squad.TargetAnchorLocation;
 			Squad.bHasMoveTarget = false;
 
-			SquadSpatialGrid.UpdateSquad(
-				Squad.SquadId,
-				OldSpatialCenter,
-				Squad.GetSpatialCenter());
+			if (bUpdateSpatialGrid
+				&& SquadSpatialGrid.UpdateSquad(
+					Squad.SquadId,
+					OldSpatialCenter,
+					Squad.GetSpatialCenter()))
+			{
+				++OutSpatialCellChanges;
+			}
 
 			bAnyAnchorChanged |=
 				!OldAnchorLocation.Equals(Squad.AnchorLocation, KINDA_SMALL_NUMBER);
@@ -108,10 +225,14 @@ bool UAlgonaSimulationSubsystem::UpdateSquadAnchors(float DeltaTime)
 			Squad.AnchorLocation += MoveDirection * MaxMoveDistance;
 		}
 
-		SquadSpatialGrid.UpdateSquad(
-			Squad.SquadId,
-			OldSpatialCenter,
-			Squad.GetSpatialCenter());
+		if (bUpdateSpatialGrid
+			&& SquadSpatialGrid.UpdateSquad(
+				Squad.SquadId,
+				OldSpatialCenter,
+				Squad.GetSpatialCenter()))
+		{
+			++OutSpatialCellChanges;
+		}
 
 		bAnyAnchorChanged = true;
 	}
@@ -121,11 +242,17 @@ bool UAlgonaSimulationSubsystem::UpdateSquadAnchors(float DeltaTime)
 
 int32 UAlgonaSimulationSubsystem::UpdateSoldiers(
 	float DeltaTime,
-	int32& OutVisitedEntities)
+	int32& OutVisitedEntities,
+	int32& OutSpatialCellChanges)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_UpdateSoldiersP1);
 
 	OutVisitedEntities = 0;
+	OutSpatialCellChanges = 0;
+
+	const bool bUpdateSpatialGrid =
+		IsSoldierSpatialGridEnabled();
+
 	int32 MovedEntities = 0;
 
 	if (!MassEntitySubsystem
@@ -142,11 +269,20 @@ int32 UAlgonaSimulationSubsystem::UpdateSoldiers(
 
 	SoldierUpdateQuery->ForEachEntityChunk(
 		ExecutionContext,
-		[this, DeltaTime, &OutVisitedEntities, &MovedEntities](
-			FMassExecutionContext& Context)
+		[
+			this,
+			DeltaTime,
+			bUpdateSpatialGrid,
+			&OutVisitedEntities,
+			&OutSpatialCellChanges,
+			&MovedEntities
+		]
+		(FMassExecutionContext& Context)
 		{
 			TArrayView<FTransformFragment> Transforms =
 				Context.GetMutableFragmentView<FTransformFragment>();
+			const TConstArrayView<FAlgonaSoldierIdFragment> Ids =
+				Context.GetFragmentView<FAlgonaSoldierIdFragment>();
 			const TConstArrayView<FAlgonaSquadMemberFragment> Members =
 				Context.GetFragmentView<FAlgonaSquadMemberFragment>();
 			TArrayView<FAlgonaSoldierMovementFragment> Movement =
@@ -197,7 +333,18 @@ int32 UAlgonaSimulationSubsystem::UpdateSoldiers(
 				SoldierMovement.Velocity = MoveDelta / DeltaTime;
 				SoldierMovement.State = EAlgonaSoldierMovementState::Moving;
 
-				Transform.SetLocation(CurrentLocation + MoveDelta);
+				const FVector NewLocation =
+					CurrentLocation + MoveDelta;
+
+				if (bUpdateSpatialGrid
+					&& SoldierSpatialGrid.UpdateSoldier(
+						Ids[Index].Value,
+						NewLocation))
+				{
+					++OutSpatialCellChanges;
+				}
+
+				Transform.SetLocation(NewLocation);
 
 				if (!SoldierMovement.Velocity.IsNearlyZero())
 				{
