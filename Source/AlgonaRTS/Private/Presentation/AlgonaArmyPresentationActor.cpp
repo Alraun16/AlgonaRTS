@@ -894,6 +894,21 @@ void AAlgonaArmyPresentationActor::RefreshPresentationWorkingSet(
 		NewObservedLinearSpeedsCmPerSecond.SetNumZeroed(NextPresentedEntityIds.Num());
 		NewTiers.SetNumUninitialized(NextPresentedEntityIds.Num());
 
+		TArray<FPrimitiveInstanceId> NewInstanceIds;
+		TArray<bool> bOldInstanceRetained;
+		const bool bHasExistingWorkingSet = !PresentedEntityIds.IsEmpty();
+		bool bIncrementalInstanceUpdateSucceeded =
+			bHasExistingWorkingSet
+			&& !NextPresentedEntityIds.IsEmpty()
+			&& InstancedSkinnedMeshComponent
+			&& InstanceIds.Num() == PresentedEntityIds.Num();
+
+		if (bIncrementalInstanceUpdateSucceeded)
+		{
+			NewInstanceIds.Reserve(NextPresentedEntityIds.Num());
+			bOldInstanceRetained.Init(false, PresentedEntityIds.Num());
+		}
+
 		bool bAnyInterpolatedTransformChanged = false;
 
 		for (int32 NewIndex = 0; NewIndex < NextPresentedEntityIds.Num(); ++NewIndex)
@@ -901,6 +916,32 @@ void AAlgonaArmyPresentationActor::RefreshPresentationWorkingSet(
 			const uint32 EntityId = NextPresentedEntityIds[NewIndex];
 			const FTransform& SnapshotTransform = NextCurrentTransforms[NewIndex];
 			const int32* OldIndexPtr = OldIndexByEntityId.Find(EntityId);
+
+			if (bIncrementalInstanceUpdateSucceeded)
+			{
+				if (OldIndexPtr && InstanceIds.IsValidIndex(*OldIndexPtr))
+				{
+					NewInstanceIds.Add(InstanceIds[*OldIndexPtr]);
+					bOldInstanceRetained[*OldIndexPtr] = true;
+				}
+				else
+				{
+					const FPrimitiveInstanceId NewInstanceId =
+						InstancedSkinnedMeshComponent->AddInstance(
+							SnapshotTransform,
+							AnimationIndex,
+							false);
+
+					if (!NewInstanceId.IsValid())
+					{
+						bIncrementalInstanceUpdateSucceeded = false;
+					}
+					else
+					{
+						NewInstanceIds.Add(NewInstanceId);
+					}
+				}
+			}
 
 			if (OldIndexPtr
 				&& PreviousTransforms.IsValidIndex(*OldIndexPtr)
@@ -974,6 +1015,27 @@ void AAlgonaArmyPresentationActor::RefreshPresentationWorkingSet(
 			}
 		}
 
+		if (bIncrementalInstanceUpdateSucceeded)
+		{
+			for (int32 OldIndex = 0; OldIndex < InstanceIds.Num(); ++OldIndex)
+			{
+				if (!bOldInstanceRetained[OldIndex]
+					&& !InstancedSkinnedMeshComponent->RemoveInstance(InstanceIds[OldIndex]))
+				{
+					bIncrementalInstanceUpdateSucceeded = false;
+					break;
+				}
+			}
+
+			if (bIncrementalInstanceUpdateSucceeded
+				&& (NewInstanceIds.Num() != NextPresentedEntityIds.Num()
+					|| InstancedSkinnedMeshComponent->GetInstanceCount()
+						!= NextPresentedEntityIds.Num()))
+			{
+				bIncrementalInstanceUpdateSucceeded = false;
+			}
+		}
+
 		PresentedEntityIds = MoveTemp(NextPresentedEntityIds);
 		PreviousTransforms = MoveTemp(NewPreviousTransforms);
 		CurrentTransforms = MoveTemp(NewCurrentTransforms);
@@ -994,7 +1056,53 @@ void AAlgonaArmyPresentationActor::RefreshPresentationWorkingSet(
 			}
 		}
 
-		RebuildInstances();
+		if (!bIncrementalInstanceUpdateSucceeded)
+		{
+			// Initial population, full disappearance, or an unexpected ISKM
+			// mutation failure: keep the old full rebuild as a safe fallback.
+			RebuildInstances();
+			return;
+		}
+
+		InstanceIds = MoveTemp(NewInstanceIds);
+
+		// RebuildInstances used to refresh this bound on every working-set
+		// change. Preserve that behavior without recreating the instances.
+		FBox WorkingSetBounds(EForceInit::ForceInit);
+		for (int32 Index = 0; Index < CurrentTransforms.Num(); ++Index)
+		{
+			WorkingSetBounds += CurrentTransforms[Index].GetLocation();
+			if (PreviousTransforms.IsValidIndex(Index))
+			{
+				WorkingSetBounds += PreviousTransforms[Index].GetLocation();
+			}
+		}
+
+		if (WorkingSetBounds.IsValid)
+		{
+			WorkingSetBounds =
+				WorkingSetBounds.ExpandBy(FVector(5000.0, 5000.0, 5000.0));
+			InstancedSkinnedMeshComponent->SetPrimitiveBoundsOverride(WorkingSetBounds);
+		}
+
+		if (bSimulationChanged)
+		{
+			if (!UploadSimulationStateToInstances())
+			{
+				return;
+			}
+		}
+		else
+		{
+			for (int32 Index = 0; Index < InstanceIds.Num(); ++Index)
+			{
+				if (!UploadInstanceGpuData(Index))
+				{
+					return;
+				}
+			}
+		}
+
 		return;
 	}
 
