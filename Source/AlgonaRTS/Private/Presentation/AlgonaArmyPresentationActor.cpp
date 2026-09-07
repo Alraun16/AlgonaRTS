@@ -63,6 +63,7 @@ namespace
 	constexpr double TierHysteresis = 0.05;
 	constexpr double TeleportDistance = 2000.0;
 	constexpr double CullingGuardPixels = 128.0;
+	constexpr double CloseCullingGuardScale = 1.5;
 
 #if WITH_EDITOR
 	template <typename TExpression>
@@ -843,6 +844,13 @@ void AAlgonaArmyPresentationActor::RefreshPresentationWorkingSet(
 		bHasValidView
 			? View.GetProjectedVerticalSizePixels(ReferenceUnitHeightCm)
 			: 0.0f;
+	const double EffectiveCullingGuardPixels =
+		bHasValidView && View.IsPerspectiveProjection()
+			? FMath::Max(
+				CullingGuardPixels,
+				static_cast<double>(ProjectedUnitHeightPixels)
+					* CloseCullingGuardScale)
+			: CullingGuardPixels;
 	GroundPixelsPerWorldUnit =
 		bHasValidView ? View.GetGroundPixelsPerWorldUnit() : 0.0f;
 
@@ -852,7 +860,7 @@ void AAlgonaArmyPresentationActor::RefreshPresentationWorkingSet(
 	for (const FAlgonaUnitSnapshot& Snapshot : CachedSnapshots)
 	{
 		if (bUsePerUnitCulling
-			&& !View.IsGroundPointVisible(Snapshot.Position, CullingGuardPixels))
+			&& !View.IsGroundPointVisible(Snapshot.Position, EffectiveCullingGuardPixels))
 		{
 			continue;
 		}
@@ -1119,6 +1127,56 @@ bool AAlgonaArmyPresentationActor::HasCameraViewChanged() const
 		return true;
 	}
 
+	const bool bPerspective =
+		Camera->ProjectionMode == ECameraProjectionMode::Perspective;
+
+	if (bPerspective != bLastCameraWasPerspective)
+	{
+		return true;
+	}
+
+	if (bPerspective)
+	{
+		// Perspective invalidation follows the projection that UE actually uses
+		// for this local view, not the camera component transform. The rendered
+		// projection can become current one frame after a zoom input.
+		UWorld* World = GetWorld();
+		FAlgonaPresentationView CurrentView;
+		if (!World
+			|| !CurrentView.Build(*World, *Camera)
+			|| !CurrentView.IsPerspectiveProjection())
+		{
+			return true;
+		}
+
+		const FIntRect& CurrentRect = CurrentView.GetProjectionViewRect();
+		if (CurrentRect.Min.X != LastPerspectiveViewRect.Min.X
+			|| CurrentRect.Min.Y != LastPerspectiveViewRect.Min.Y
+			|| CurrentRect.Max.X != LastPerspectiveViewRect.Max.X
+			|| CurrentRect.Max.Y != LastPerspectiveViewRect.Max.Y)
+		{
+			return true;
+		}
+
+		const FMatrix& CurrentMatrix = CurrentView.GetViewProjectionMatrix();
+		constexpr double MatrixTolerance = 1.0e-8;
+		for (int32 Row = 0; Row < 4; ++Row)
+		{
+			for (int32 Column = 0; Column < 4; ++Column)
+			{
+				if (!FMath::IsNearlyEqual(
+						CurrentMatrix.M[Row][Column],
+						LastPerspectiveViewProjectionMatrix.M[Row][Column],
+						MatrixTolerance))
+				{
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
+
 	return !Camera->GetComponentTransform().Equals(LastCameraTransform, 0.01f)
 		|| !FMath::IsNearlyEqual(Camera->OrthoWidth, LastCameraOrthoWidth, 0.01f)
 		|| !FMath::IsNearlyEqual(Camera->AspectRatio, LastCameraAspectRatio, 0.001f);
@@ -1133,9 +1191,36 @@ void AAlgonaArmyPresentationActor::CacheCurrentCameraView()
 		return;
 	}
 
+	const bool bPerspective =
+		Camera->ProjectionMode == ECameraProjectionMode::Perspective;
+
+	if (bPerspective)
+	{
+		// Cache the same rendered projection state used by the perspective
+		// visibility path so a later projection update cannot be mistaken for
+		// an already processed camera transform.
+		UWorld* World = GetWorld();
+		FAlgonaPresentationView CurrentView;
+		if (!World
+			|| !CurrentView.Build(*World, *Camera)
+			|| !CurrentView.IsPerspectiveProjection())
+		{
+			bHasCameraView = false;
+			return;
+		}
+
+		LastPerspectiveViewProjectionMatrix =
+			CurrentView.GetViewProjectionMatrix();
+		LastPerspectiveViewRect = CurrentView.GetProjectionViewRect();
+		bLastCameraWasPerspective = true;
+		bHasCameraView = true;
+		return;
+	}
+
 	LastCameraTransform = Camera->GetComponentTransform();
 	LastCameraOrthoWidth = Camera->OrthoWidth;
 	LastCameraAspectRatio = Camera->AspectRatio;
+	bLastCameraWasPerspective = false;
 	bHasCameraView = true;
 }
 

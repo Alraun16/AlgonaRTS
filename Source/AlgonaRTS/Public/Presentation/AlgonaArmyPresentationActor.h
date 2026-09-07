@@ -121,6 +121,8 @@ private:
 
 	TWeakObjectPtr<UCameraComponent> PresentationCamera;
 	FTransform LastCameraTransform = FTransform::Identity;
+	FMatrix LastPerspectiveViewProjectionMatrix = FMatrix::Identity;
+	FIntRect LastPerspectiveViewRect = FIntRect(0, 0, 0, 0);
 
 	uint64 LastStateRevision = 0;
 	uint64 LastSimulationTick = 0;
@@ -150,6 +152,7 @@ private:
 	bool bHasCapturedState = false;
 	bool bInterpolationActive = false;
 	bool bHasCameraView = false;
+	bool bLastCameraWasPerspective = false;
 	bool bHasCullingMode = false;
 	bool bLastCullingEnabled = true;
 	bool bHasSpatialSnapshotMode = false;

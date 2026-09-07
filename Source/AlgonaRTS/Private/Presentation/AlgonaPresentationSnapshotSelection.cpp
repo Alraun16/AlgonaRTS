@@ -13,6 +13,8 @@
 namespace
 {
 	constexpr double CullingGuardPixels = 128.0;
+	constexpr double CullingReferenceHeightCm = 170.0;
+	constexpr double CloseCullingGuardScale = 1.5;
 
 	TAutoConsoleVariable<int32> CVarAlgonaP1SpatialSnapshots(
 		TEXT("algona.P1.SpatialSnapshots"),
@@ -148,8 +150,18 @@ void CaptureAlgonaPresentationSnapshots(
 	FVector2D QueryMin = FVector2D::ZeroVector;
 	FVector2D QueryMax = FVector2D::ZeroVector;
 
-	if (!View.Build(*World, *Camera)
-		|| !View.GetGroundBounds(CullingGuardPixels, QueryMin, QueryMax))
+	const bool bHasValidView = View.Build(*World, *Camera);
+	const double EffectiveCullingGuardPixels =
+		bHasValidView && View.IsPerspectiveProjection()
+			? FMath::Max(
+				CullingGuardPixels,
+				static_cast<double>(
+					View.GetProjectedVerticalSizePixels(CullingReferenceHeightCm))
+					* CloseCullingGuardScale)
+			: CullingGuardPixels;
+
+	if (!bHasValidView
+		|| !View.GetGroundBounds(EffectiveCullingGuardPixels, QueryMin, QueryMax))
 	{
 #if !UE_BUILD_SHIPPING
 		const double ExportStartSeconds = FPlatformTime::Seconds();
