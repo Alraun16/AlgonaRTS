@@ -19,6 +19,8 @@ class UMassEntityConfigAsset;
 class UMassEntitySubsystem;
 class UMassSpawnerSubsystem;
 
+ALGONASIMULATION_API DECLARE_LOG_CATEGORY_EXTERN(LogAlgonaSimulation, Log, All);
+
 namespace AlgonaSimulationDefaults
 {
 	inline constexpr double FixedStepSeconds = 1.0 / 40.0;
@@ -167,12 +169,6 @@ public:
 	void SetStressMoveEnabled(bool bEnabled);
 
 private:
-	struct FAlgonaSquadEntityRange
-	{
-		int32 FirstUnitIndex = INDEX_NONE;
-		int32 Count = 0;
-	};
-
 	// Накопленная статистика шагов за одно окно реального времени.
 	// Используется только для периодического отчёта в лог.
 	struct FAlgonaMetricsReportWindow
@@ -202,9 +198,16 @@ private:
 	bool CreateSquads(int32 RequestedSquadSize);
 	void DestroyUnits();
 
+	/**
+	 * Проверяет связь Squad <-> Unit: число активных Unit равно числу слотов,
+	 * у каждого Unit правильные SquadId и SlotIndex, каждый Unit ровно в
+	 * одном слоте. Вызывается после создания армии в не-shipping сборках.
+	 */
+	bool ValidateSquadMembership();
+
 	void RunSimulationStep(float DeltaTime);
 	void ProcessPendingMoveCommands();
-	bool UpdateSquadAnchors(float DeltaTime);
+	bool UpdateSquadCenters(float DeltaTime);
 	int32 UpdateUnits(
 		float DeltaTime,
 		int32& OutVisitedEntities);
@@ -251,7 +254,6 @@ private:
 
 	TArray<FMassEntityHandle> UnitEntities;
 	TArray<FAlgonaSquad> Squads;
-	TArray<FAlgonaSquadEntityRange> SquadEntityRanges;
 	TArray<FAlgonaSquadMoveCommand> PendingMoveCommands;
 
 	FAlgonaMetricsReportWindow MetricsReportWindow;

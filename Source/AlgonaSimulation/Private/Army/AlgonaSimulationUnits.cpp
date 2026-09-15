@@ -98,17 +98,25 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 	constexpr float SpaceBetweenSquads = 600.0f;
 	constexpr float UnitSpacing = 150.0f;
 
-	const int32 FormationWidth = FMath::Min(
-		10,
-		RequestedSquadSize);
-	const int32 FormationDepth = FMath::DivideAndRoundUp(
+	// Размер полного отряда на земле задаёт шаг расстановки отрядов на карте.
+	FAlgonaFormationParams ReferenceParams;
+	ReferenceParams.RowLength = GetAlgonaDefaultRowLength(RequestedSquadSize);
+	ReferenceParams.SlotSpacing = UnitSpacing;
+	ReferenceParams.RowSpacing = UnitSpacing;
+
+	FAlgonaFormationLayout ReferenceLayout;
+	BuildAlgonaFormationLayout(
+		ReferenceParams,
 		RequestedSquadSize,
-		FormationWidth);
+		ReferenceLayout);
 
 	const float FormationWorldDepth =
-		static_cast<float>(FormationDepth - 1) * UnitSpacing;
+		static_cast<float>(ReferenceLayout.RowCount - 1)
+		* ReferenceParams.RowSpacing;
 	const float FormationWorldWidth =
-		static_cast<float>(FormationWidth - 1) * UnitSpacing;
+		static_cast<float>(
+			FMath::Min(ReferenceParams.RowLength, RequestedSquadSize) - 1)
+		* ReferenceParams.SlotSpacing;
 
 	const float SquadSpacingX =
 		FormationWorldDepth + SpaceBetweenSquads;
@@ -121,8 +129,6 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 
 	Squads.Reset();
 	Squads.Reserve(SquadCount);
-	SquadEntityRanges.Reset();
-	SquadEntityRanges.Reserve(SquadCount);
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 
@@ -132,29 +138,48 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 		SquadIndex < SquadCount;
 		++SquadIndex)
 	{
-		FAlgonaSquad Squad;
+		// Массив зарезервирован заранее, поэтому ссылка остаётся валидной.
+		FAlgonaSquad& Squad = Squads.AddDefaulted_GetRef();
 		Squad.SquadId = SquadIndex;
-		Squad.FormationWidth = FormationWidth;
-		Squad.FormationDepth = FormationDepth;
-		Squad.UnitSpacing = UnitSpacing;
-		Squad.MemberCount = FMath::Min(
+
+		const int32 MemberCount = FMath::Min(
 			RequestedSquadSize,
 			UnitEntities.Num() - UnitIndex);
 
-		const int32 FirstUnitIndex = UnitIndex;
+		// Раскладка строится генератором формы для фактического числа Unit.
+		Squad.FormationParams = ReferenceParams;
+		Squad.FormationParams.RowLength =
+			GetAlgonaDefaultRowLength(MemberCount);
+
+		BuildAlgonaFormationLayout(
+			Squad.FormationParams,
+			MemberCount,
+			Squad.FormationLayout);
+
+		++Squad.FormationRevision;
+
+		// Передние строки отрядов одного ряда стоят на одной линии,
+		// центр отряда отсчитывается от передней строки.
 		const int32 SquadX = SquadIndex % SquadsPerRow;
 		const int32 SquadY = SquadIndex / SquadsPerRow;
 
-		Squad.AnchorLocation = FVector(
+		const double FrontRowX =
 			static_cast<double>(SquadX) * SquadSpacingX
-				+ FormationWorldDepth,
+			+ FormationWorldDepth;
+
+		Squad.CenterLocation = FVector(
+			FrontRowX - Squad.FormationLayout.FrontRowLocalX,
 			static_cast<double>(SquadY) * SquadSpacingY
 				+ FormationWorldWidth * 0.5,
 			0.0);
-		Squad.TargetAnchorLocation = Squad.AnchorLocation;
+		Squad.TargetCenterLocation = Squad.CenterLocation;
 
+		Squad.ActiveUnitIds.Reserve(MemberCount);
+
+		// Unit получают слоты по порядку: слот SlotIndex — Unit с этим номером
+		// в ActiveUnitIds.
 		for (int32 SlotIndex = 0;
-			SlotIndex < Squad.MemberCount;
+			SlotIndex < MemberCount;
 			++SlotIndex)
 		{
 			if (!UnitEntities.IsValidIndex(UnitIndex))
@@ -181,6 +206,8 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 			Member.SquadId = Squad.SquadId;
 			Member.SlotIndex = SlotIndex;
 
+			Squad.ActiveUnitIds.Add(Id.Value);
+
 			FAlgonaUnitMovementFragment& Movement =
 				EntityView.GetFragmentData<FAlgonaUnitMovementFragment>();
 			Movement.Velocity = FVector::ZeroVector;
@@ -204,23 +231,15 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 			++UnitIndex;
 		}
 
-		Squads.Add(MoveTemp(Squad));
-
-		FAlgonaSquadEntityRange& EntityRange =
-			SquadEntityRanges.AddDefaulted_GetRef();
-		EntityRange.FirstUnitIndex = FirstUnitIndex;
-		EntityRange.Count = Squads.Last().MemberCount;
-
 		if (IsSquadSpatialGridEnabled())
 		{
 			SquadSpatialGrid.AddSquad(
-				Squads.Last().SquadId,
-				Squads.Last().GetSpatialCenter());
+				Squad.SquadId,
+				Squad.CenterLocation);
 		}
 	}
 
-	return UnitIndex == UnitEntities.Num()
-		&& SquadEntityRanges.Num() == Squads.Num();
+	return UnitIndex == UnitEntities.Num();
 }
 
 void UAlgonaSimulationSubsystem::DestroyUnits()
@@ -234,7 +253,6 @@ void UAlgonaSimulationSubsystem::DestroyUnits()
 
 	UnitEntities.Reset();
 	Squads.Reset();
-	SquadEntityRanges.Reset();
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	PendingMoveCommands.Reset();
@@ -269,21 +287,19 @@ int32 UAlgonaSimulationSubsystem::ExportUnitSnapshotsForSquads(
 	for (const int32 SquadId : SquadIds)
 	{
 		if (!Squads.IsValidIndex(SquadId)
-			|| Squads[SquadId].SquadId != SquadId
-			|| !SquadEntityRanges.IsValidIndex(SquadId))
+			|| Squads[SquadId].SquadId != SquadId)
 		{
 			continue;
 		}
 
-		const FAlgonaSquadEntityRange& EntityRange =
-			SquadEntityRanges[SquadId];
-		if (EntityRange.Count <= 0
-			|| SelectedUnitCount + EntityRange.Count > MaxEntities)
+		const int32 SquadUnitCount = Squads[SquadId].ActiveUnitIds.Num();
+		if (SquadUnitCount <= 0
+			|| SelectedUnitCount + SquadUnitCount > MaxEntities)
 		{
 			break;
 		}
 
-		SelectedUnitCount += EntityRange.Count;
+		SelectedUnitCount += SquadUnitCount;
 		++AcceptedSquadCount;
 	}
 
@@ -318,28 +334,24 @@ int32 UAlgonaSimulationSubsystem::ExportUnitSnapshotsForSquads(
 			}
 
 			if (!Squads.IsValidIndex(SquadId)
-				|| Squads[SquadId].SquadId != SquadId
-				|| !SquadEntityRanges.IsValidIndex(SquadId))
+				|| Squads[SquadId].SquadId != SquadId)
 			{
 				continue;
 			}
 
-			const FAlgonaSquadEntityRange& EntityRange =
-				SquadEntityRanges[SquadId];
-			if (EntityRange.Count <= 0)
+			const TArray<uint32>& ActiveUnitIds =
+				Squads[SquadId].ActiveUnitIds;
+			if (ActiveUnitIds.IsEmpty())
 			{
 				continue;
 			}
 
 			++ProcessedSquadCount;
 
-			for (int32 MemberOffset = 0;
-				MemberOffset < EntityRange.Count;
-				++MemberOffset)
+			for (const uint32 UnitId : ActiveUnitIds)
 			{
-				const int32 UnitIndex =
-					EntityRange.FirstUnitIndex + MemberOffset;
-				if (!UnitEntities.IsValidIndex(UnitIndex))
+				const int32 UnitIndex = static_cast<int32>(UnitId) - 1;
+				if (UnitId == 0 || !UnitEntities.IsValidIndex(UnitIndex))
 				{
 					continue;
 				}
@@ -351,15 +363,13 @@ int32 UAlgonaSimulationSubsystem::ExportUnitSnapshotsForSquads(
 				}
 
 				FMassEntityView EntityView(EntityManager, Entity);
-				const FAlgonaUnitIdFragment& Id =
-					EntityView.GetFragmentData<FAlgonaUnitIdFragment>();
 				const FTransformFragment& TransformFragment =
 					EntityView.GetFragmentData<FTransformFragment>();
 				const FTransform& Transform = TransformFragment.GetTransform();
 
 				FAlgonaUnitSnapshot& Snapshot =
 					OutSnapshots.AddDefaulted_GetRef();
-				Snapshot.EntityId = Id.Value;
+				Snapshot.EntityId = UnitId;
 				Snapshot.Position = Transform.GetLocation();
 				Snapshot.Facing = Transform.GetRotation();
 			}
@@ -383,8 +393,7 @@ int32 UAlgonaSimulationSubsystem::ExportUnitSnapshotsForSquads(
 
 		if (!Squads.IsValidIndex(SquadId)
 			|| Squads[SquadId].SquadId != SquadId
-			|| !SquadEntityRanges.IsValidIndex(SquadId)
-			|| SquadEntityRanges[SquadId].Count <= 0)
+			|| Squads[SquadId].ActiveUnitIds.IsEmpty())
 		{
 			continue;
 		}
@@ -613,9 +622,10 @@ FVector UAlgonaSimulationSubsystem::ComputeSlotWorldPosition(
 	const FAlgonaSquad& Squad,
 	int32 SlotIndex) const
 {
-	if (SlotIndex < 0 || Squad.FormationWidth <= 0)
+	const TArray<FAlgonaFormationSlot>& Slots = Squad.FormationLayout.Slots;
+	if (!Slots.IsValidIndex(SlotIndex))
 	{
-		return Squad.AnchorLocation;
+		return Squad.CenterLocation;
 	}
 
 	FVector Forward = Squad.FacingDirection.GetSafeNormal2D();
@@ -628,17 +638,111 @@ FVector UAlgonaSimulationSubsystem::ComputeSlotWorldPosition(
 		FVector::UpVector,
 		Forward).GetSafeNormal();
 
-	const int32 Row = SlotIndex / Squad.FormationWidth;
-	const int32 Column = SlotIndex % Squad.FormationWidth;
+	// Смещение слота из раскладки поворачивается по направлению Squad:
+	// X раскладки — вперёд, Y — вправо.
+	const FVector2f& LocalOffset = Slots[SlotIndex].LocalOffset;
 
-	const double ForwardOffset =
-		-static_cast<double>(Row) * Squad.UnitSpacing;
-	const double RightOffset =
-		(static_cast<double>(Column)
-			- static_cast<double>(Squad.FormationWidth - 1) * 0.5)
-		* Squad.UnitSpacing;
+	return Squad.CenterLocation
+		+ Forward * static_cast<double>(LocalOffset.X)
+		+ Right * static_cast<double>(LocalOffset.Y);
+}
 
-	return Squad.AnchorLocation
-		+ Forward * ForwardOffset
-		+ Right * RightOffset;
+bool UAlgonaSimulationSubsystem::ValidateSquadMembership()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_ValidateSquadMembership);
+
+	if (!MassEntitySubsystem)
+	{
+		return false;
+	}
+
+	FMassEntityManager& EntityManager =
+		MassEntitySubsystem->GetMutableEntityManager();
+
+	int32 CheckedUnitCount = 0;
+
+	for (const FAlgonaSquad& Squad : Squads)
+	{
+		// Каждому слоту раскладки соответствует ровно один активный Unit.
+		if (Squad.ActiveUnitIds.Num() != Squad.FormationLayout.Slots.Num())
+		{
+			UE_LOG(
+				LogAlgonaSimulation,
+				Error,
+				TEXT("[P2 Squads] Squad %d: %d active units for %d slots"),
+				Squad.SquadId,
+				Squad.ActiveUnitIds.Num(),
+				Squad.FormationLayout.Slots.Num());
+			return false;
+		}
+
+		for (int32 SlotIndex = 0;
+			SlotIndex < Squad.ActiveUnitIds.Num();
+			++SlotIndex)
+		{
+			const uint32 UnitId = Squad.ActiveUnitIds[SlotIndex];
+			const int32 UnitIndex = static_cast<int32>(UnitId) - 1;
+
+			if (UnitId == 0
+				|| !UnitEntities.IsValidIndex(UnitIndex)
+				|| !EntityManager.IsEntityValid(UnitEntities[UnitIndex]))
+			{
+				UE_LOG(
+					LogAlgonaSimulation,
+					Error,
+					TEXT("[P2 Squads] Squad %d slot %d: invalid UnitId %u"),
+					Squad.SquadId,
+					SlotIndex,
+					UnitId);
+				return false;
+			}
+
+			// Обратная связь: Unit помнит тот же Squad и тот же слот.
+			// Если UnitId повторяется в двух слотах, одна из проверок не сойдётся.
+			FMassEntityView EntityView(
+				EntityManager,
+				UnitEntities[UnitIndex]);
+
+			const FAlgonaSquadMemberFragment& Member =
+				EntityView.GetFragmentData<FAlgonaSquadMemberFragment>();
+
+			if (Member.SquadId != Squad.SquadId
+				|| Member.SlotIndex != SlotIndex)
+			{
+				UE_LOG(
+					LogAlgonaSimulation,
+					Error,
+					TEXT("[P2 Squads] Unit %u is in squad %d slot %d, but its fragment says squad %d slot %d"),
+					UnitId,
+					Squad.SquadId,
+					SlotIndex,
+					Member.SquadId,
+					Member.SlotIndex);
+				return false;
+			}
+
+			++CheckedUnitCount;
+		}
+	}
+
+	// Все Unit распределены по слотам, ни один не остался вне Squad.
+	if (CheckedUnitCount != UnitEntities.Num())
+	{
+		UE_LOG(
+			LogAlgonaSimulation,
+			Error,
+			TEXT("[P2 Squads] %d units in slots, but %d units exist"),
+			CheckedUnitCount,
+			UnitEntities.Num());
+		return false;
+	}
+
+	UE_LOG(
+		LogAlgonaSimulation,
+		Display,
+		TEXT("[P2 Squads] membership OK squads=%d units=%d"),
+		Squads.Num(),
+		CheckedUnitCount);
+
+	return true;
 }

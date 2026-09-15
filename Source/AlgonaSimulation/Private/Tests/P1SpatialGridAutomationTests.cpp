@@ -1,4 +1,3 @@
-#include "Army/AlgonaSquad.h"
 #include "Spatial/AlgonaSquadSpatialGrid.h"
 
 #include "Misc/AutomationTest.h"
@@ -69,17 +68,6 @@ bool FAlgonaP1SpatialGridTest::RunTest(const FString& Parameters)
 	{
 		TestEqual(TEXT("New cell contains squad 20"), SquadIds[0], 20);
 	}
-
-	FAlgonaSquad Squad;
-	Squad.MemberCount = 50;
-	Squad.FormationWidth = 10;
-	Squad.UnitSpacing = 100.0f;
-	Squad.AnchorLocation = FVector(1000.0, 0.0, 0.0);
-	Squad.FacingDirection = FVector::ForwardVector;
-
-	TestTrue(
-		TEXT("Spatial center is the occupied formation center, not front anchor"),
-		Squad.GetSpatialCenter().Equals(FVector(800.0, 0.0, 0.0), 0.01));
 
 	return true;
 }

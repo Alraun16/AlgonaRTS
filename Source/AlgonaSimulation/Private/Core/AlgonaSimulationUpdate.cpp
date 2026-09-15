@@ -32,8 +32,8 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 		FPlatformTime::Seconds();
 
 	// Стадия 2: движение отрядов.
-	const bool bSquadAnchorsChanged =
-		UpdateSquadAnchors(DeltaTime);
+	const bool bSquadCentersChanged =
+		UpdateSquadCenters(DeltaTime);
 
 	const double SquadsEndSeconds =
 		FPlatformTime::Seconds();
@@ -48,7 +48,7 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	const double UnitsEndSeconds =
 		FPlatformTime::Seconds();
 
-	if (bSquadAnchorsChanged || MovedEntities > 0)
+	if (bSquadCentersChanged || MovedEntities > 0)
 	{
 		++StateRevision;
 	}
@@ -83,20 +83,20 @@ void UAlgonaSimulationSubsystem::ProcessPendingMoveCommands()
 		}
 
 		FAlgonaSquad& Squad = Squads[Command.SquadId];
-		Squad.TargetAnchorLocation = Command.TargetLocation;
-		Squad.TargetAnchorLocation.Z = Squad.AnchorLocation.Z;
+		Squad.TargetCenterLocation = Command.TargetLocation;
+		Squad.TargetCenterLocation.Z = Squad.CenterLocation.Z;
 		Squad.bHasMoveTarget = true;
 	}
 
 	PendingMoveCommands.Reset();
 }
 
-bool UAlgonaSimulationSubsystem::UpdateSquadAnchors(
+bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 	float DeltaTime)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_UpdateSquads);
 
-	bool bAnyAnchorChanged = false;
+	bool bAnyCenterChanged = false;
 
 	for (FAlgonaSquad& Squad : Squads)
 	{
@@ -105,63 +105,57 @@ bool UAlgonaSimulationSubsystem::UpdateSquadAnchors(
 			continue;
 		}
 
-		const FVector OldSpatialCenter = Squad.GetSpatialCenter();
-		const FVector OldAnchorLocation = Squad.AnchorLocation;
+		const FVector OldCenterLocation = Squad.CenterLocation;
 
 		FVector ToTarget =
-			Squad.TargetAnchorLocation - Squad.AnchorLocation;
+			Squad.TargetCenterLocation - Squad.CenterLocation;
 		ToTarget.Z = 0.0;
 
 		const double DistanceToTarget = ToTarget.Length();
 
 		if (DistanceToTarget <= KINDA_SMALL_NUMBER)
 		{
-			Squad.AnchorLocation = Squad.TargetAnchorLocation;
+			// Центр уже в цели: приказ завершён без изменения направления.
+			Squad.CenterLocation = Squad.TargetCenterLocation;
 			Squad.bHasMoveTarget = false;
 
-			if (IsSquadSpatialGridEnabled())
-			{
-				SquadSpatialGrid.UpdateSquad(
-					Squad.SquadId,
-					OldSpatialCenter,
-					Squad.GetSpatialCenter());
-			}
-
-			bAnyAnchorChanged |=
-				!OldAnchorLocation.Equals(
-					Squad.AnchorLocation,
+			bAnyCenterChanged |=
+				!OldCenterLocation.Equals(
+					Squad.CenterLocation,
 					KINDA_SMALL_NUMBER);
-			continue;
-		}
-
-		const FVector MoveDirection = ToTarget / DistanceToTarget;
-		Squad.FacingDirection = MoveDirection;
-
-		const double MaxMoveDistance =
-			static_cast<double>(Squad.AnchorMoveSpeed) * DeltaTime;
-
-		if (DistanceToTarget <= MaxMoveDistance)
-		{
-			Squad.AnchorLocation = Squad.TargetAnchorLocation;
-			Squad.bHasMoveTarget = false;
 		}
 		else
 		{
-			Squad.AnchorLocation += MoveDirection * MaxMoveDistance;
+			// Пока направление меняется мгновенно; плавный поворот — задача L1.
+			const FVector MoveDirection = ToTarget / DistanceToTarget;
+			Squad.FacingDirection = MoveDirection;
+
+			const double MaxMoveDistance =
+				static_cast<double>(Squad.CenterMoveSpeed) * DeltaTime;
+
+			if (DistanceToTarget <= MaxMoveDistance)
+			{
+				Squad.CenterLocation = Squad.TargetCenterLocation;
+				Squad.bHasMoveTarget = false;
+			}
+			else
+			{
+				Squad.CenterLocation += MoveDirection * MaxMoveDistance;
+			}
+
+			bAnyCenterChanged = true;
 		}
 
 		if (IsSquadSpatialGridEnabled())
 		{
 			SquadSpatialGrid.UpdateSquad(
 				Squad.SquadId,
-				OldSpatialCenter,
-				Squad.GetSpatialCenter());
+				OldCenterLocation,
+				Squad.CenterLocation);
 		}
-
-		bAnyAnchorChanged = true;
 	}
 
-	return bAnyAnchorChanged;
+	return bAnyCenterChanged;
 }
 
 int32 UAlgonaSimulationSubsystem::UpdateUnits(

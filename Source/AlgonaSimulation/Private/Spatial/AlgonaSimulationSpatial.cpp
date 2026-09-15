@@ -55,7 +55,7 @@ int32 UAlgonaSimulationSubsystem::QuerySquadsInBounds(
 		FAlgonaSquadSpatialSnapshot& Snapshot =
 			OutSquads.AddDefaulted_GetRef();
 		Snapshot.SquadId = SquadId;
-		Snapshot.Center = Squads[SquadId].GetSpatialCenter();
+		Snapshot.Center = Squads[SquadId].CenterLocation;
 	}
 
 	return OutSquads.Num();

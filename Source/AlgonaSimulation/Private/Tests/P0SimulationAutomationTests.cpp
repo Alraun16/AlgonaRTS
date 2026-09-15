@@ -35,9 +35,13 @@ bool FAlgonaP0SimulationTypesTest::RunTest(const FString& Parameters)
 
 	const FAlgonaSquad DefaultSquad;
 	TestEqual(
-		TEXT("Default squad has 50 formation slots"),
-		DefaultSquad.GetFormationCapacity(),
-		50);
+		TEXT("Default squad has no slots until its formation is built"),
+		DefaultSquad.FormationLayout.Slots.Num(),
+		0);
+	TestEqual(
+		TEXT("Default squad has no active units"),
+		DefaultSquad.ActiveUnitIds.Num(),
+		0);
 
 	const FAlgonaUnitMovementFragment DefaultMovement;
 	TestEqual(
@@ -49,8 +53,8 @@ bool FAlgonaP0SimulationTypesTest::RunTest(const FString& Parameters)
 		TEXT("Default squad has no active move target"),
 		DefaultSquad.bHasMoveTarget);
 	TestTrue(
-		TEXT("Default squad anchor speed is positive"),
-		DefaultSquad.AnchorMoveSpeed > 0.0f);
+		TEXT("Default squad center speed is positive"),
+		DefaultSquad.CenterMoveSpeed > 0.0f);
 	TestTrue(
 		TEXT("Default unit follow speed is positive"),
 		DefaultSquad.UnitMoveSpeed > 0.0f);

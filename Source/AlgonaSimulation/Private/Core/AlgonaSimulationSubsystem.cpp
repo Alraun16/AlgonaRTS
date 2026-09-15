@@ -37,7 +37,7 @@ namespace
 		ECVF_Default);
 }
 
-DEFINE_LOG_CATEGORY_STATIC(LogAlgonaSimulation, Log, All);
+DEFINE_LOG_CATEGORY(LogAlgonaSimulation);
 
 #if !UE_BUILD_SHIPPING
 
@@ -151,6 +151,17 @@ void UAlgonaSimulationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		return;
 	}
 
+#if !UE_BUILD_SHIPPING
+	// Разовая полная проверка связи Squad <-> Unit после создания армии.
+	if (!ValidateSquadMembership())
+	{
+		Metrics.StartupState =
+			EAlgonaSimulationStartupState::SquadInitializationFailed;
+		DestroyUnits();
+		return;
+	}
+#endif
+
 	// First complete authoritative state is now available to Presentation.
 	++StateRevision;
 
@@ -168,7 +179,6 @@ void UAlgonaSimulationSubsystem::Deinitialize()
 	// DestroyUnits() here. The world owns and tears down the entity manager.
 	UnitEntities.Reset();
 	Squads.Reset();
-	SquadEntityRanges.Reset();
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	PendingMoveCommands.Reset();
@@ -321,7 +331,7 @@ int32 UAlgonaSimulationSubsystem::SubmitMoveAllSquadsByOffset(
 	{
 		if (SubmitMoveSquadCommand(
 			Squad.SquadId,
-			Squad.AnchorLocation + Offset))
+			Squad.CenterLocation + Offset))
 		{
 			++SubmittedCommands;
 		}
@@ -390,7 +400,7 @@ void UAlgonaSimulationSubsystem::SubmitStressMoveCommands()
 
 		SubmitMoveSquadCommand(
 			Squad.SquadId,
-			Squad.AnchorLocation
+			Squad.CenterLocation
 				+ FVector(
 					0.0,
 					Direction * AlgonaSimulationDefaults::StressMoveDistanceCm,
