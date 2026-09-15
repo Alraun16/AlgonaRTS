@@ -2,6 +2,13 @@
 
 #include "CoreMinimal.h"
 
+namespace AlgonaFormationLimits
+{
+	// Допустимый диапазон длины строки для приказов игрока.
+	inline constexpr int32 MinRowLength = 1;
+	inline constexpr int32 MaxRowLength = 100;
+}
+
 /** Форма построения Squad. Первая реализация — только прямоугольник. */
 enum class EAlgonaFormationShape : uint8
 {

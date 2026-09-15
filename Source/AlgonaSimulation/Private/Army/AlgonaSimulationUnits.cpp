@@ -146,17 +146,21 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 			RequestedSquadSize,
 			UnitEntities.Num() - UnitIndex);
 
-		// Раскладка строится генератором формы для фактического числа Unit.
+		// Состав заполняется заранее: UnitId детерминирован (номер Unit + 1),
+		// поэтому раскладку можно построить до записи фрагментов. Раскладка
+		// строится тем же путём, что и при Reform.
 		Squad.FormationParams = ReferenceParams;
-		Squad.FormationParams.RowLength =
-			GetAlgonaDefaultRowLength(MemberCount);
+		Squad.ActiveUnitIds.Reserve(MemberCount);
 
-		BuildAlgonaFormationLayout(
-			Squad.FormationParams,
-			MemberCount,
-			Squad.FormationLayout);
+		for (int32 SlotIndex = 0;
+			SlotIndex < MemberCount;
+			++SlotIndex)
+		{
+			Squad.AddActiveUnit(
+				static_cast<uint32>(UnitIndex + SlotIndex + 1));
+		}
 
-		++Squad.FormationRevision;
+		Squad.RebuildFormationLayout();
 
 		// Передние строки отрядов одного ряда стоят на одной линии,
 		// центр отряда отсчитывается от передней строки.
@@ -174,10 +178,8 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 			0.0);
 		Squad.TargetCenterLocation = Squad.CenterLocation;
 
-		Squad.ActiveUnitIds.Reserve(MemberCount);
-
-		// Unit получают слоты по порядку: слот SlotIndex — Unit с этим номером
-		// в ActiveUnitIds.
+		// Фрагменты Unit заполняются по слотам: слот SlotIndex занимает Unit
+		// ActiveUnitIds[SlotIndex] = UnitIndex + 1.
 		for (int32 SlotIndex = 0;
 			SlotIndex < MemberCount;
 			++SlotIndex)
@@ -205,8 +207,6 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 				EntityView.GetFragmentData<FAlgonaSquadMemberFragment>();
 			Member.SquadId = Squad.SquadId;
 			Member.SlotIndex = SlotIndex;
-
-			Squad.ActiveUnitIds.Add(Id.Value);
 
 			FAlgonaUnitMovementFragment& Movement =
 				EntityView.GetFragmentData<FAlgonaUnitMovementFragment>();
@@ -255,7 +255,7 @@ void UAlgonaSimulationSubsystem::DestroyUnits()
 	Squads.Reset();
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
-	PendingMoveCommands.Reset();
+	PendingCommands.Reset();
 	bStressMoveEnabled = false;
 	StressMoveDirections.Reset();
 	UnitEntityConfig = nullptr;
@@ -628,12 +628,7 @@ FVector UAlgonaSimulationSubsystem::ComputeSlotWorldPosition(
 		return Squad.CenterLocation;
 	}
 
-	FVector Forward = Squad.FacingDirection.GetSafeNormal2D();
-	if (Forward.IsNearlyZero())
-	{
-		Forward = FVector::ForwardVector;
-	}
-
+	const FVector Forward = Squad.GetForwardDirection2D();
 	const FVector Right = FVector::CrossProduct(
 		FVector::UpVector,
 		Forward).GetSafeNormal();

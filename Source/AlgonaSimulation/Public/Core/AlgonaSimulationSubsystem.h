@@ -40,11 +40,32 @@ namespace AlgonaSimulationDefaults
 	inline constexpr bool EnableSquadSpatialGrid = false;
 }
 
-/** Command consumed at the beginning of the next authoritative fixed step. */
-struct FAlgonaSquadMoveCommand
+/** Тип команды Squad в очереди команд Simulation. */
+enum class EAlgonaSquadCommandType : uint8
 {
+	// Идти центром Squad в точку. Заменяет текущий приказ движения.
+	Move,
+
+	// Приказ длины строки: Reform относительно центра Squad.
+	SetRowLength
+};
+
+/**
+ * Команда очереди команд Simulation.
+ * Очередь — транспорт от игрока, сети и AI: все команды применяются строго
+ * по порядку поступления в начале следующего fixed step, затем очередь
+ * очищается. Текущий приказ хранит сам Squad.
+ */
+struct FAlgonaSquadCommand
+{
+	EAlgonaSquadCommandType Type = EAlgonaSquadCommandType::Move;
 	int32 SquadId = INDEX_NONE;
+
+	// Move: целевая точка центра Squad.
 	FVector TargetLocation = FVector::ZeroVector;
+
+	// SetRowLength: запрошенная длина строки.
+	int32 RowLength = 0;
 };
 
 /**
@@ -153,9 +174,15 @@ public:
 		TArray<FAlgonaUnitSnapshot>& OutSnapshots,
 		int32 MaxEntities);
 
+	// Команды не меняют состояние сразу: они ставятся в очередь и
+	// применяются в начале следующего fixed step.
 	bool SubmitMoveSquadCommand(
 		int32 SquadId,
 		const FVector& TargetLocation);
+
+	bool SubmitSetRowLengthCommand(
+		int32 SquadId,
+		int32 RowLength);
 
 	int32 SubmitMoveAllSquadsByOffset(const FVector& Offset);
 
@@ -206,7 +233,7 @@ private:
 	bool ValidateSquadMembership();
 
 	void RunSimulationStep(float DeltaTime);
-	void ProcessPendingMoveCommands();
+	void ProcessPendingCommands();
 	bool UpdateSquadCenters(float DeltaTime);
 	int32 UpdateUnits(
 		float DeltaTime,
@@ -254,7 +281,8 @@ private:
 
 	TArray<FMassEntityHandle> UnitEntities;
 	TArray<FAlgonaSquad> Squads;
-	TArray<FAlgonaSquadMoveCommand> PendingMoveCommands;
+	// Очередь команд до начала следующего fixed step.
+	TArray<FAlgonaSquadCommand> PendingCommands;
 
 	FAlgonaMetricsReportWindow MetricsReportWindow;
 

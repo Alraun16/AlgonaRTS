@@ -68,6 +68,49 @@ namespace
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
 			&StressMoveCommand),
 		ECVF_Cheat);
+
+	// Отладочный приказ длины строки через обычную очередь команд.
+	void SetRowLengthCommand(
+		const TArray<FString>& Arguments,
+		UWorld* World)
+	{
+		if (!World || Arguments.Num() < 2)
+		{
+			return;
+		}
+
+		UAlgonaSimulationSubsystem* Simulation =
+			World->GetSubsystem<UAlgonaSimulationSubsystem>();
+
+		if (!Simulation)
+		{
+			return;
+		}
+
+		const int32 SquadId = FCString::Atoi(*Arguments[0]);
+		const int32 RowLength = FCString::Atoi(*Arguments[1]);
+
+		if (SquadId >= 0)
+		{
+			Simulation->SubmitSetRowLengthCommand(SquadId, RowLength);
+			return;
+		}
+
+		// SquadId < 0 — приказ всем Squad.
+		for (int32 AnySquadId = 0;
+			AnySquadId < Simulation->GetSquadCount();
+			++AnySquadId)
+		{
+			Simulation->SubmitSetRowLengthCommand(AnySquadId, RowLength);
+		}
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs GAlgonaP2SetRowLengthCommand(
+		TEXT("algona.P2.SetRowLength"),
+		TEXT("Order squad row length through the command queue: SquadId (-1 = all squads) RowLength."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
+			&SetRowLengthCommand),
+		ECVF_Cheat);
 }
 
 #endif
@@ -181,7 +224,7 @@ void UAlgonaSimulationSubsystem::Deinitialize()
 	Squads.Reset();
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
-	PendingMoveCommands.Reset();
+	PendingCommands.Reset();
 	bStressMoveEnabled = false;
 	StressMoveDirections.Reset();
 	UnitEntityConfig = nullptr;
@@ -310,10 +353,30 @@ bool UAlgonaSimulationSubsystem::SubmitMoveSquadCommand(
 		return false;
 	}
 
-	FAlgonaSquadMoveCommand& Command =
-		PendingMoveCommands.AddDefaulted_GetRef();
+	FAlgonaSquadCommand& Command =
+		PendingCommands.AddDefaulted_GetRef();
+	Command.Type = EAlgonaSquadCommandType::Move;
 	Command.SquadId = SquadId;
 	Command.TargetLocation = TargetLocation;
+	return true;
+}
+
+bool UAlgonaSimulationSubsystem::SubmitSetRowLengthCommand(
+	int32 SquadId,
+	int32 RowLength)
+{
+	if (!IsAuthoritativeSimulationWorld()
+		|| !Squads.IsValidIndex(SquadId)
+		|| Squads[SquadId].SquadId != SquadId)
+	{
+		return false;
+	}
+
+	FAlgonaSquadCommand& Command =
+		PendingCommands.AddDefaulted_GetRef();
+	Command.Type = EAlgonaSquadCommandType::SetRowLength;
+	Command.SquadId = SquadId;
+	Command.RowLength = RowLength;
 	return true;
 }
 

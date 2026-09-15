@@ -26,7 +26,7 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 		SubmitStressMoveCommands();
 	}
 
-	ProcessPendingMoveCommands();
+	ProcessPendingCommands();
 
 	const double CommandsEndSeconds =
 		FPlatformTime::Seconds();
@@ -70,11 +70,12 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	AccumulateMetricsReportStep();
 }
 
-void UAlgonaSimulationSubsystem::ProcessPendingMoveCommands()
+void UAlgonaSimulationSubsystem::ProcessPendingCommands()
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_ProcessCommands);
 
-	for (const FAlgonaSquadMoveCommand& Command : PendingMoveCommands)
+	// Команды применяются строго в порядке поступления.
+	for (const FAlgonaSquadCommand& Command : PendingCommands)
 	{
 		if (!Squads.IsValidIndex(Command.SquadId)
 			|| Squads[Command.SquadId].SquadId != Command.SquadId)
@@ -83,12 +84,25 @@ void UAlgonaSimulationSubsystem::ProcessPendingMoveCommands()
 		}
 
 		FAlgonaSquad& Squad = Squads[Command.SquadId];
-		Squad.TargetCenterLocation = Command.TargetLocation;
-		Squad.TargetCenterLocation.Z = Squad.CenterLocation.Z;
-		Squad.bHasMoveTarget = true;
+
+		switch (Command.Type)
+		{
+		case EAlgonaSquadCommandType::Move:
+			// Новый приказ движения полностью заменяет текущий.
+			Squad.TargetCenterLocation = Command.TargetLocation;
+			Squad.TargetCenterLocation.Z = Squad.CenterLocation.Z;
+			Squad.bHasMoveTarget = true;
+			break;
+
+		case EAlgonaSquadCommandType::SetRowLength:
+			// Меняются только позиции слотов, назначение Unit по слотам то же,
+			// поэтому фрагменты Unit обновлять не нужно.
+			Squad.ApplyRowLengthOrder(Command.RowLength);
+			break;
+		}
 	}
 
-	PendingMoveCommands.Reset();
+	PendingCommands.Reset();
 }
 
 bool UAlgonaSimulationSubsystem::UpdateSquadCenters(

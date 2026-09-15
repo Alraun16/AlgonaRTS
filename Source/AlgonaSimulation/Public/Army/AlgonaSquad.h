@@ -15,6 +15,42 @@
  */
 struct ALGONASIMULATION_API FAlgonaSquad
 {
+	/** Направление «вперёд» на плоскости; ForwardVector, если оно не задано. */
+	FVector GetForwardDirection2D() const;
+
+	// Операции над составом меняют только массивы Squad. Вызывающий код
+	// обязан обновить SlotIndex во фрагменте Unit, чей слот изменился,
+	// и затем вызвать ReformAfterCompositionChange.
+
+	/**
+	 * Убирает активный Unit из слота SlotIndex (swap-remove): на его место
+	 * встаёт последний активный Unit. OutMovedUnitId — UnitId, получивший
+	 * слот SlotIndex, или 0, если убран последний Unit.
+	 */
+	bool RemoveActiveUnitAt(int32 SlotIndex, uint32& OutMovedUnitId);
+
+	/** Добавляет Unit в конец состава. Возвращает его SlotIndex. */
+	int32 AddActiveUnit(uint32 UnitId);
+
+	/**
+	 * Строит раскладку заново под текущий состав и параметры: пересчитывает
+	 * длину строки по умолчанию (если игрок её не задавал) и увеличивает
+	 * FormationRevision. Центр Squad не трогает.
+	 */
+	void RebuildFormationLayout();
+
+	/**
+	 * Reform после изменения состава (смерть, Потерянный, возвращение,
+	 * подкрепление): строки остаются на месте, центр Squad сдвигается.
+	 */
+	void ReformAfterCompositionChange();
+
+	/**
+	 * Приказ игрока «длина строки»: Reform относительно центра, центр Squad
+	 * остаётся на месте. Возвращает true, если раскладка изменилась.
+	 */
+	bool ApplyRowLengthOrder(int32 RowLength);
+
 	int32 SquadId = INDEX_NONE;
 
 	// Поза Squad: центр раскладки слотов на земле и направление «вперёд».
@@ -24,6 +60,9 @@ struct ALGONASIMULATION_API FAlgonaSquad
 
 	// Параметры построения — вход генератора формы.
 	FAlgonaFormationParams FormationParams;
+
+	// Игрок задал длину строки вручную: правило по умолчанию больше не действует.
+	bool bRowLengthSetByPlayer = false;
 
 	// Раскладка слотов — выход генератора формы. Меняется только при Reform.
 	FAlgonaFormationLayout FormationLayout;
