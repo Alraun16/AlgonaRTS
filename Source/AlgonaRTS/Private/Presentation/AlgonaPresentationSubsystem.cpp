@@ -59,10 +59,9 @@ void UAlgonaPresentationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
 	Super::OnWorldBeginPlay(InWorld);
 
-	if (GEngine)
-	{
-		GEngine->SetMaxFPS(165.0f);
-	}
+	// Лимит FPS здесь не задаётся: это пользовательская настройка (t.MaxFPS
+	// в DefaultEngine.ini или консоли). UEngine::SetMaxFPS перезаписал бы
+	// значение, введённое в консоли до старта мира.
 
 	// Keep the two basic benchmark overlays enabled in normal Editor and
 	// Development runs. Shipping may suppress engine stats independently.

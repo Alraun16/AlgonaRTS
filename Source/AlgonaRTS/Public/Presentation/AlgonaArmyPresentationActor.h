@@ -47,7 +47,7 @@ private:
 	bool PrepareSkinnedRenderer();
 	UAnimSequenceTransformProviderData* CreateSequenceProvider(UAnimBank* InAnimBank);
 	bool ValidateInstancingBuildSettings();
-	bool BuildGpuInterpolationMaterials();
+	bool AssignGpuInterpolationMaterials();
 
 	void CaptureLatestState(UAlgonaSimulationSubsystem& Simulation);
 	void RefreshPresentationWorkingSet(
@@ -95,8 +95,9 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UAnimSequenceTransformProviderData> SequenceProvider = nullptr;
 
+	// Готовые материалы GPU-интерполяции, сохранённые генератором редактора.
 	UPROPERTY(Transient)
-	TArray<TObjectPtr<UMaterialInterface>> RuntimeInterpolationMaterials;
+	TArray<TObjectPtr<UMaterialInterface>> GpuInterpolationMaterials;
 
 	UPROPERTY(EditAnywhere, Category = "Algona|Presentation")
 	int32 MaxPresentedEntities = 500000;

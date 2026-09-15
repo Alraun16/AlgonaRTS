@@ -2,6 +2,7 @@
 
 #include "AlgonaPresentationSnapshotSelection.h"
 #include "AlgonaPresentationView.h"
+#include "Presentation/AlgonaGpuInterpolationLayout.h"
 #include "Presentation/AlgonaPresentationSettings.h"
 #include "Core/AlgonaSimulationSubsystem.h"
 
@@ -18,40 +19,24 @@
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "UObject/Class.h"
 
-#if WITH_EDITOR
-#include "MaterialEditingLibrary.h"
-#include "MaterialExpressionIO.h"
-#include "Materials/Material.h"
-#include "Materials/MaterialExpressionConstant3Vector.h"
-#include "Materials/MaterialExpressionCustom.h"
-#include "Materials/MaterialExpressionPerInstanceCustomData.h"
-#include "Materials/MaterialExpressionScalarParameter.h"
-#include "Materials/MaterialExpressionWorldPosition.h"
-#include "Materials/MaterialInstanceConstant.h"
-#endif
-
 DEFINE_LOG_CATEGORY_STATIC(LogAlgonaPresentation, Log, All);
 
 namespace
 {
-	constexpr TCHAR AnimBankPath[] =
-		TEXT("/Game/NewFolder/NewAnimBank.NewAnimBank");
+	// Раскладка данных GPU-интерполяции общая с редакторским генератором
+	// материалов (AlgonaRTSEditor), поэтому берётся из одного заголовка.
+	using AlgonaGpuInterpolation::AnimBankPath;
+	using AlgonaGpuInterpolation::PrevPositionIndex;
+	using AlgonaGpuInterpolation::PrevRotationIndex;
+	using AlgonaGpuInterpolation::PrevScaleIndex;
+	using AlgonaGpuInterpolation::CurrentPositionIndex;
+	using AlgonaGpuInterpolation::CurrentRotationIndex;
+	using AlgonaGpuInterpolation::CurrentScaleIndex;
+	using AlgonaGpuInterpolation::TierIndex;
+	using AlgonaGpuInterpolation::CustomDataFloatCount;
+	using AlgonaGpuInterpolation::NearAlphaPrimitiveDataIndex;
 
 	constexpr int32 AnimationIndex = 0;
-
-	// Per-instance GPU interpolation data layout.
-	constexpr int32 PrevPositionIndex = 0;
-	constexpr int32 PrevRotationIndex = 3;
-	constexpr int32 PrevScaleIndex = 7;
-	constexpr int32 CurrentPositionIndex = 10;
-	constexpr int32 CurrentRotationIndex = 13;
-	constexpr int32 CurrentScaleIndex = 17;
-	constexpr int32 TierIndex = 20;
-	constexpr int32 GpuInstanceCustomDataFloatCount = 21;
-
-	// Component-level alpha values. FAR bypasses sub-step interpolation.
-	constexpr int32 NearAlphaPrimitiveDataIndex = 0;
-	constexpr int32 MediumAlphaPrimitiveDataIndex = 1;
 
 	// Current debug unit height. When final representation types are added,
 	// this becomes a per-type value derived from their actual visual bounds.
@@ -64,338 +49,6 @@ namespace
 	constexpr double TeleportDistance = 2000.0;
 	constexpr double CullingGuardPixels = 128.0;
 	constexpr double CloseCullingGuardScale = 1.5;
-
-#if WITH_EDITOR
-	template <typename TExpression>
-	TExpression* CreateTransientMaterialExpression(
-		UMaterial* Material,
-		int32 NodeX,
-		int32 NodeY)
-	{
-		return Cast<TExpression>(
-			UMaterialEditingLibrary::CreateMaterialExpressionEx(
-				Material,
-				nullptr,
-				TExpression::StaticClass(),
-				nullptr,
-				NodeX,
-				NodeY,
-				false));
-	}
-
-	bool AddCustomInput(
-		UMaterialExpressionCustom& Custom,
-		const TCHAR* Name,
-		UMaterialExpression* Expression)
-	{
-		if (!Expression)
-		{
-			return false;
-		}
-
-		FCustomInput& Input = Custom.Inputs.AddDefaulted_GetRef();
-		Input.InputName = Name;
-		Input.Input.Connect(0, Expression);
-		return true;
-	}
-
-	bool AddCustomInput(
-		UMaterialExpressionCustom& Custom,
-		const TCHAR* Name,
-		const FExpressionInput& ExpressionInput)
-	{
-		if (!ExpressionInput.Expression)
-		{
-			return false;
-		}
-
-		FCustomInput& Input = Custom.Inputs.AddDefaulted_GetRef();
-		Input.InputName = Name;
-		Input.Input = ExpressionInput;
-		return true;
-	}
-
-	bool InjectGpuInterpolationIntoMaterial(
-		UMaterial& RuntimeMaterial,
-		FString& OutError)
-	{
-		UMaterialEditorOnlyData* EditorData = RuntimeMaterial.GetEditorOnlyData();
-		if (!EditorData)
-		{
-			OutError = TEXT("material has no editor-only graph data");
-			return false;
-		}
-
-		if (RuntimeMaterial.bUseMaterialAttributes)
-		{
-			OutError =
-				TEXT("material uses Material Attributes; current WPO bridge does not support that graph yet");
-			return false;
-		}
-
-		FExpressionInput OriginalWpoInput =
-			static_cast<const FExpressionInput&>(EditorData->WorldPositionOffset);
-
-		if (!OriginalWpoInput.Expression)
-		{
-			UMaterialExpressionConstant3Vector* ZeroWpo =
-				CreateTransientMaterialExpression<UMaterialExpressionConstant3Vector>(
-					&RuntimeMaterial,
-					-900,
-					900);
-
-			if (!ZeroWpo)
-			{
-				OutError = TEXT("cannot create zero WPO expression");
-				return false;
-			}
-
-			const FVector3f ConstantWpo =
-				EditorData->WorldPositionOffset.UseConstant
-					? EditorData->WorldPositionOffset.Constant
-					: FVector3f::ZeroVector;
-
-			ZeroWpo->Constant = FLinearColor(
-				ConstantWpo.X,
-				ConstantWpo.Y,
-				ConstantWpo.Z,
-				1.0f);
-
-			OriginalWpoInput.Connect(0, ZeroWpo);
-		}
-
-		UMaterialExpressionWorldPosition* WorldPosition =
-			CreateTransientMaterialExpression<UMaterialExpressionWorldPosition>(
-				&RuntimeMaterial,
-				-900,
-				-500);
-
-		if (!WorldPosition)
-		{
-			OutError = TEXT("cannot create WorldPosition expression");
-			return false;
-		}
-
-		WorldPosition->WorldPositionShaderOffset = WPT_ExcludeAllShaderOffsets;
-
-		static const TCHAR* InstanceInputNames[GpuInstanceCustomDataFloatCount] =
-		{
-			TEXT("PrevPX"), TEXT("PrevPY"), TEXT("PrevPZ"),
-			TEXT("PrevQX"), TEXT("PrevQY"), TEXT("PrevQZ"), TEXT("PrevQW"),
-			TEXT("PrevSX"), TEXT("PrevSY"), TEXT("PrevSZ"),
-			TEXT("CurrPX"), TEXT("CurrPY"), TEXT("CurrPZ"),
-			TEXT("CurrQX"), TEXT("CurrQY"), TEXT("CurrQZ"), TEXT("CurrQW"),
-			TEXT("CurrSX"), TEXT("CurrSY"), TEXT("CurrSZ"),
-			TEXT("InterpTier")
-		};
-
-		TArray<UMaterialExpressionPerInstanceCustomData*> InstanceDataExpressions;
-		InstanceDataExpressions.Reserve(GpuInstanceCustomDataFloatCount);
-
-		for (int32 DataIndex = 0; DataIndex < GpuInstanceCustomDataFloatCount; ++DataIndex)
-		{
-			UMaterialExpressionPerInstanceCustomData* Expression =
-				CreateTransientMaterialExpression<UMaterialExpressionPerInstanceCustomData>(
-					&RuntimeMaterial,
-					-900,
-					-400 + DataIndex * 40);
-
-			if (!Expression)
-			{
-				OutError = TEXT("cannot create PerInstanceCustomData expression");
-				return false;
-			}
-
-			Expression->DataIndex = static_cast<uint32>(DataIndex);
-			Expression->ConstDefaultValue = 0.0f;
-			InstanceDataExpressions.Add(Expression);
-		}
-
-		struct FAlphaExpressionDesc
-		{
-			const TCHAR* Name;
-			int32 PrimitiveDataIndex;
-		};
-
-		static const FAlphaExpressionDesc AlphaDescs[] =
-		{
-			{TEXT("AlphaNear"), NearAlphaPrimitiveDataIndex},
-			{TEXT("AlphaMedium"), MediumAlphaPrimitiveDataIndex}
-		};
-
-		TArray<UMaterialExpressionScalarParameter*> AlphaExpressions;
-		AlphaExpressions.Reserve(UE_ARRAY_COUNT(AlphaDescs));
-
-		for (int32 Index = 0; Index < UE_ARRAY_COUNT(AlphaDescs); ++Index)
-		{
-			UMaterialExpressionScalarParameter* Expression =
-				CreateTransientMaterialExpression<UMaterialExpressionScalarParameter>(
-					&RuntimeMaterial,
-					-500,
-					-400 + Index * 80);
-
-			if (!Expression)
-			{
-				OutError = TEXT("cannot create CustomPrimitiveData alpha expression");
-				return false;
-			}
-
-			Expression->ParameterName = FName(AlphaDescs[Index].Name);
-			Expression->DefaultValue = 1.0f;
-			Expression->bUseCustomPrimitiveData = true;
-			Expression->PrimitiveDataIndex =
-				static_cast<uint8>(AlphaDescs[Index].PrimitiveDataIndex);
-			AlphaExpressions.Add(Expression);
-		}
-
-		UMaterialExpressionCustom* Custom =
-			CreateTransientMaterialExpression<UMaterialExpressionCustom>(
-				&RuntimeMaterial,
-				100,
-				0);
-
-		if (!Custom)
-		{
-			OutError = TEXT("cannot create custom interpolation expression");
-			return false;
-		}
-
-		Custom->Description = TEXT("Algona GPU buffered interpolation");
-		Custom->OutputType = CMOT_Float3;
-		Custom->Code = TEXT(R"ALGONA(
-// FAR uses the latest authoritative instance transform directly.
-[branch]
-if (InterpTier >= 1.5)
-{
-    return OriginalWPO;
-}
-
-float Alpha = (InterpTier < 0.5) ? AlphaNear : AlphaMedium;
-Alpha = saturate(Alpha);
-
-float3 PrevPos = float3(PrevPX, PrevPY, PrevPZ);
-float4 PrevQ = normalize(float4(PrevQX, PrevQY, PrevQZ, PrevQW));
-float3 PrevScale = float3(PrevSX, PrevSY, PrevSZ);
-float3 CurrPos = float3(CurrPX, CurrPY, CurrPZ);
-float4 CurrQ = normalize(float4(CurrQX, CurrQY, CurrQZ, CurrQW));
-float3 CurrScale = float3(CurrSX, CurrSY, CurrSZ);
-
-float4 TargetQ = CurrQ;
-float CosTheta = dot(PrevQ, TargetQ);
-if (CosTheta < 0.0)
-{
-    TargetQ = -TargetQ;
-    CosTheta = -CosTheta;
-}
-CosTheta = clamp(CosTheta, -1.0, 1.0);
-
-float4 InterpQ;
-
-// NEAR uses true shortest-path Slerp. MEDIUM uses normalized Lerp.
-if (InterpTier >= 0.5 || CosTheta > 0.9995)
-{
-    InterpQ = normalize(lerp(PrevQ, TargetQ, Alpha));
-}
-else
-{
-    float Theta = acos(CosTheta);
-    float SinTheta = max(sin(Theta), 0.00001);
-    float A = sin((1.0 - Alpha) * Theta) / SinTheta;
-    float B = sin(Alpha * Theta) / SinTheta;
-    InterpQ = normalize(PrevQ * A + TargetQ * B);
-}
-
-float3 InterpPos = lerp(PrevPos, CurrPos, Alpha);
-float3 InterpScale = lerp(PrevScale, CurrScale, Alpha);
-
-// WorldPos is already skinned under the CURRENT rigid instance transform.
-// Undo only that rigid transform, then apply the interpolated rigid transform.
-float3 FromCurrentOrigin = WorldPos - CurrPos;
-float4 InvCurrQ = float4(-CurrQ.xyz, CurrQ.w);
-float3 CurrentLocalRotated =
-    FromCurrentOrigin
-    + 2.0 * cross(
-        InvCurrQ.xyz,
-        cross(InvCurrQ.xyz, FromCurrentOrigin)
-        + InvCurrQ.w * FromCurrentOrigin);
-
-float3 SafeCurrScale = float3(
-    abs(CurrScale.x) > 0.0001 ? CurrScale.x : 1.0,
-    abs(CurrScale.y) > 0.0001 ? CurrScale.y : 1.0,
-    abs(CurrScale.z) > 0.0001 ? CurrScale.z : 1.0);
-float3 LocalPosition = CurrentLocalRotated / SafeCurrScale;
-float3 InterpLocal = LocalPosition * InterpScale;
-
-float3 InterpRotated =
-    InterpLocal
-    + 2.0 * cross(
-        InterpQ.xyz,
-        cross(InterpQ.xyz, InterpLocal)
-        + InterpQ.w * InterpLocal);
-
-float3 InterpWorld = InterpPos + InterpRotated;
-return OriginalWPO + (InterpWorld - WorldPos);
-)ALGONA");
-
-		if (!AddCustomInput(*Custom, TEXT("WorldPos"), WorldPosition))
-		{
-			OutError = TEXT("cannot connect WorldPosition input");
-			return false;
-		}
-
-		for (int32 Index = 0; Index < InstanceDataExpressions.Num(); ++Index)
-		{
-			if (!AddCustomInput(
-				*Custom,
-				InstanceInputNames[Index],
-				InstanceDataExpressions[Index]))
-			{
-				OutError = TEXT("cannot connect instance data input");
-				return false;
-			}
-		}
-
-		for (int32 Index = 0; Index < AlphaExpressions.Num(); ++Index)
-		{
-			if (!AddCustomInput(
-				*Custom,
-				AlphaDescs[Index].Name,
-				AlphaExpressions[Index]))
-			{
-				OutError = TEXT("cannot connect alpha input");
-				return false;
-			}
-		}
-
-		if (!AddCustomInput(*Custom, TEXT("OriginalWPO"), OriginalWpoInput))
-		{
-			OutError = TEXT("cannot connect original WPO input");
-			return false;
-		}
-
-		EditorData->WorldPositionOffset.Connect(0, Custom);
-		RuntimeMaterial.bAlwaysEvaluateWorldPositionOffset = true;
-
-		UMaterialEditingLibrary::SetBaseMaterialUsage(
-			&RuntimeMaterial,
-			MATUSAGE_InstancedSkinnedMesh,
-			true);
-
-		Custom->PostEditChange();
-		RuntimeMaterial.PostEditChange();
-
-		const TArray<FString> CompileErrors =
-			UMaterialEditingLibrary::RecompileMaterial(&RuntimeMaterial);
-
-		if (!CompileErrors.IsEmpty())
-		{
-			OutError = FString::Join(CompileErrors, TEXT(" | "));
-			return false;
-		}
-
-		return true;
-	}
-#endif
 }
 
 AAlgonaArmyPresentationActor::AAlgonaArmyPresentationActor()
@@ -640,9 +293,9 @@ bool AAlgonaArmyPresentationActor::PrepareSkinnedRenderer()
 	InstancedSkinnedMeshComponent->SetTransformProvider(nullptr);
 	InstancedSkinnedMeshComponent->SetSkinnedAssetAndUpdate(AnimBank->Asset.Get(), true);
 	InstancedSkinnedMeshComponent->SetTransformProvider(SequenceProvider);
-	InstancedSkinnedMeshComponent->SetNumCustomDataFloats(GpuInstanceCustomDataFloatCount);
+	InstancedSkinnedMeshComponent->SetNumCustomDataFloats(CustomDataFloatCount);
 
-	if (!BuildGpuInterpolationMaterials())
+	if (!AssignGpuInterpolationMaterials())
 	{
 		return false;
 	}
@@ -713,91 +366,45 @@ bool AAlgonaArmyPresentationActor::ValidateInstancingBuildSettings()
 	return true;
 }
 
-bool AAlgonaArmyPresentationActor::BuildGpuInterpolationMaterials()
+bool AAlgonaArmyPresentationActor::AssignGpuInterpolationMaterials()
 {
-#if !WITH_EDITOR
-	Fail(TEXT(
-		"ISKM Presentation currently needs an Editor build because the proven P1 GPU interpolation path injects transient WPO materials at runtime. Replace this bridge with authored production materials before packaged builds."));
-	return false;
-#else
 	if (!AnimBank || !AnimBank->Asset || !InstancedSkinnedMeshComponent)
 	{
 		return false;
 	}
 
-	RuntimeInterpolationMaterials.Reset();
+	GpuInterpolationMaterials.Reset();
 
-	const TArray<FSkeletalMaterial>& SourceMaterials = AnimBank->Asset->GetMaterials();
-	RuntimeInterpolationMaterials.Reserve(SourceMaterials.Num());
+	// Материалы с GPU-интерполяцией заранее сохранены генератором редактора,
+	// по одному на material slot. Здесь они только загружаются и назначаются:
+	// PIE и Standalone используют один и тот же путь.
+	const int32 MaterialSlotCount = AnimBank->Asset->GetMaterials().Num();
+	GpuInterpolationMaterials.Reserve(MaterialSlotCount);
 
-	for (int32 MaterialIndex = 0; MaterialIndex < SourceMaterials.Num(); ++MaterialIndex)
+	for (int32 MaterialIndex = 0; MaterialIndex < MaterialSlotCount; ++MaterialIndex)
 	{
-		UMaterialInterface* SourceInterface = SourceMaterials[MaterialIndex].MaterialInterface;
-		if (!SourceInterface)
+		const FString MaterialPath = AlgonaGpuInterpolation::GetObjectPath(
+			AlgonaGpuInterpolation::GetMaterialInstanceAssetName(MaterialIndex));
+
+		UMaterialInterface* Material =
+			LoadObject<UMaterialInterface>(nullptr, *MaterialPath);
+
+		if (!Material)
 		{
 			Fail(FString::Printf(
-				TEXT("ISKM Presentation failed: material slot %d is null"),
-				MaterialIndex));
-			return false;
-		}
-
-		UMaterial* SourceBaseMaterial = SourceInterface->GetMaterial();
-		if (!SourceBaseMaterial)
-		{
-			Fail(FString::Printf(
-				TEXT("ISKM Presentation failed: material slot %d has no base material"),
-				MaterialIndex));
-			return false;
-		}
-
-		UMaterial* RuntimeBaseMaterial = DuplicateObject<UMaterial>(SourceBaseMaterial, this);
-		if (!RuntimeBaseMaterial)
-		{
-			Fail(FString::Printf(
-				TEXT("ISKM Presentation failed: cannot duplicate material slot %d"),
-				MaterialIndex));
-			return false;
-		}
-
-		RuntimeBaseMaterial->SetFlags(RF_Transient);
-
-		FString MaterialError;
-		if (!InjectGpuInterpolationIntoMaterial(*RuntimeBaseMaterial, MaterialError))
-		{
-			Fail(FString::Printf(
-				TEXT("ISKM Presentation GPU material %d failed: %s"),
+				TEXT("ISKM Presentation failed: GPU interpolation material for slot %d is missing (%s). In the editor, outside PIE, run console command algona.P1.BuildGpuInterpolationMaterials"),
 				MaterialIndex,
-				*MaterialError));
+				*MaterialPath));
 			return false;
 		}
 
-		UMaterialInterface* RuntimeInterface = RuntimeBaseMaterial;
-
-		if (SourceInterface != SourceBaseMaterial)
-		{
-			UMaterialInstanceConstant* RuntimeInstance =
-				NewObject<UMaterialInstanceConstant>(this, NAME_None, RF_Transient);
-
-			if (!RuntimeInstance)
-			{
-				Fail(TEXT("ISKM Presentation failed: cannot create transient material instance"));
-				return false;
-			}
-
-			RuntimeInstance->SetParentEditorOnly(RuntimeBaseMaterial, false);
-			RuntimeInstance->CopyMaterialUniformParametersEditorOnly(SourceInterface, true);
-			RuntimeInstance->PostEditChange();
-			RuntimeInterface = RuntimeInstance;
-		}
-
-		// READY must not include transient shader compilation in benchmarks.
-		RuntimeInterface->EnsureIsComplete();
-		RuntimeInterpolationMaterials.Add(RuntimeInterface);
-		InstancedSkinnedMeshComponent->SetMaterial(MaterialIndex, RuntimeInterface);
+		// READY must not include shader compilation in benchmarks.
+		Material->EnsureIsComplete();
+		GpuInterpolationMaterials.Add(Material);
+		InstancedSkinnedMeshComponent->SetMaterial(MaterialIndex, Material);
 	}
 
 	return true;
-#endif
 }
 
 void AAlgonaArmyPresentationActor::CaptureLatestState(
@@ -1529,7 +1136,7 @@ bool AAlgonaArmyPresentationActor::UploadInstanceGpuData(int32 Index)
 		return false;
 	}
 
-	float Data[GpuInstanceCustomDataFloatCount] = {};
+	float Data[CustomDataFloatCount] = {};
 
 	const FTransform& Previous = PreviousTransforms[Index];
 	const FTransform& Current = CurrentTransforms[Index];
@@ -1565,7 +1172,7 @@ bool AAlgonaArmyPresentationActor::UploadInstanceGpuData(int32 Index)
 
 	if (!InstancedSkinnedMeshComponent->SetCustomData(
 		InstanceIds[Index],
-		TConstArrayView<float>(Data, GpuInstanceCustomDataFloatCount)))
+		TConstArrayView<float>(Data, CustomDataFloatCount)))
 	{
 		Fail(FString::Printf(
 			TEXT("ISKM Presentation failed: SetCustomData failed at %d"),

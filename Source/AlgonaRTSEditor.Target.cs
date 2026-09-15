@@ -11,7 +11,8 @@ public class AlgonaRTSEditorTarget : TargetRules
 		ExtraModuleNames.AddRange(new[]
 		{
 			"AlgonaRTS",
-			"AlgonaSimulation"
+			"AlgonaSimulation",
+			"AlgonaRTSEditor"
 		});
 	}
 }

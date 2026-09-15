@@ -19,12 +19,7 @@ public class AlgonaRTS : ModuleRules
 			"InputCore"
 		});
 
-		// P1 currently injects the proven GPU interpolation WPO into transient
-		// materials in Editor builds. A cooked production material path can
-		// replace this bridge later without changing Simulation or visibility.
-		if (Target.bBuildEditor)
-		{
-			PrivateDependencyModuleNames.Add("MaterialEditor");
-		}
+		// GPU interpolation materials are authored ahead of time by the
+		// AlgonaRTSEditor module. The game module only loads ready assets.
 	}
 }
