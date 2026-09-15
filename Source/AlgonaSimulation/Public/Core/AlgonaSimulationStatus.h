@@ -24,6 +24,12 @@ struct ALGONASIMULATION_API FAlgonaSimulationMetrics
 	int32 LastMovedEntities = 0;
 	int32 LastExecutedStepsThisFrame = 0;
 	double LastStepMilliseconds = 0.0;
+
+	// Время отдельных стадий последнего fixed step, мс.
+	// Сумма стадий чуть меньше LastStepMilliseconds: остаток — учёт метрик.
+	double LastCommandsMilliseconds = 0.0;
+	double LastSquadsMilliseconds = 0.0;
+	double LastUnitsMilliseconds = 0.0;
 	double BacklogSeconds = 0.0;
 	uint64 OverloadedFrameCount = 0;
 };

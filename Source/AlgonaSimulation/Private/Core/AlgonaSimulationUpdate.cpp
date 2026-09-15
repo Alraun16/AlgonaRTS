@@ -14,40 +14,66 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_FixedStep);
 
-	const double StartSeconds =
+	const double StepStartSeconds =
 		FPlatformTime::Seconds();
 
 	++SimulationTick;
 
+	// Стадия 1: команды. Приказы стресс-сценария замеров подаются в ту же
+	// очередь непосредственно перед её разбором.
+	if (bStressMoveEnabled)
+	{
+		SubmitStressMoveCommands();
+	}
+
 	ProcessPendingMoveCommands();
 
+	const double CommandsEndSeconds =
+		FPlatformTime::Seconds();
+
+	// Стадия 2: движение отрядов.
 	const bool bSquadAnchorsChanged =
 		UpdateSquadAnchors(DeltaTime);
 
+	const double SquadsEndSeconds =
+		FPlatformTime::Seconds();
+
+	// Стадия 3: движение Unit вместе с обновлением Unit Grid.
 	int32 VisitedEntities = 0;
 	const int32 MovedEntities =
 		UpdateUnits(
 			DeltaTime,
 			VisitedEntities);
 
+	const double UnitsEndSeconds =
+		FPlatformTime::Seconds();
+
 	if (bSquadAnchorsChanged || MovedEntities > 0)
 	{
 		++StateRevision;
 	}
-
-	const double StepMilliseconds =
-		(FPlatformTime::Seconds() - StartSeconds) * 1000.0;
 
 	Metrics.SimulationTick = SimulationTick;
 	Metrics.EntityCount = UnitEntities.Num();
 	Metrics.SquadCount = Squads.Num();
 	Metrics.LastVisitedEntities = VisitedEntities;
 	Metrics.LastMovedEntities = MovedEntities;
-	Metrics.LastStepMilliseconds = StepMilliseconds;
+	Metrics.LastCommandsMilliseconds =
+		(CommandsEndSeconds - StepStartSeconds) * 1000.0;
+	Metrics.LastSquadsMilliseconds =
+		(SquadsEndSeconds - CommandsEndSeconds) * 1000.0;
+	Metrics.LastUnitsMilliseconds =
+		(UnitsEndSeconds - SquadsEndSeconds) * 1000.0;
+	Metrics.LastStepMilliseconds =
+		(FPlatformTime::Seconds() - StepStartSeconds) * 1000.0;
+
+	AccumulateMetricsReportStep();
 }
 
 void UAlgonaSimulationSubsystem::ProcessPendingMoveCommands()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_ProcessCommands);
+
 	for (const FAlgonaSquadMoveCommand& Command : PendingMoveCommands)
 	{
 		if (!Squads.IsValidIndex(Command.SquadId)
@@ -68,6 +94,8 @@ void UAlgonaSimulationSubsystem::ProcessPendingMoveCommands()
 bool UAlgonaSimulationSubsystem::UpdateSquadAnchors(
 	float DeltaTime)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_UpdateSquads);
+
 	bool bAnyAnchorChanged = false;
 
 	for (FAlgonaSquad& Squad : Squads)

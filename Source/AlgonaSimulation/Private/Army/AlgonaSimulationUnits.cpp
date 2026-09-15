@@ -94,7 +94,7 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 	FMassEntityManager& EntityManager =
 		MassEntitySubsystem->GetMutableEntityManager();
 
-	constexpr int32 SquadsPerRow = 40;
+	const int32 SquadsPerRow = AlgonaSimulationDefaults::SquadsPerRow;
 	constexpr float SpaceBetweenSquads = 600.0f;
 	constexpr float UnitSpacing = 150.0f;
 
@@ -238,6 +238,8 @@ void UAlgonaSimulationSubsystem::DestroyUnits()
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	PendingMoveCommands.Reset();
+	bStressMoveEnabled = false;
+	StressMoveDirections.Reset();
 	UnitEntityConfig = nullptr;
 
 	Metrics.EntityCount = 0;

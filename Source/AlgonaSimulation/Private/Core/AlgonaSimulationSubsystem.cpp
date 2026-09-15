@@ -4,6 +4,7 @@
 
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
+#include "HAL/PlatformTime.h"
 #include "Mass/EntityFragments.h"
 #include "MassEntityManager.h"
 #include "MassEntitySubsystem.h"
@@ -26,7 +27,50 @@ namespace
 		AlgonaSimulationDefaults::SquadSize,
 		TEXT("Requested number of units in one P0/P1 squad."),
 		ECVF_Default);
+
+	// Период отчёта метрик в лог по реальному времени, а не по числу шагов:
+	// при сильной перегрузке отчёт всё равно приходит. 0 — выключено.
+	TAutoConsoleVariable<float> CVarAlgonaP2MetricsReportSeconds(
+		TEXT("algona.P2.MetricsReportSeconds"),
+		0.0f,
+		TEXT("Wall-clock period in seconds of the simulation metrics log report. 0 disables it."),
+		ECVF_Default);
 }
+
+DEFINE_LOG_CATEGORY_STATIC(LogAlgonaSimulation, Log, All);
+
+#if !UE_BUILD_SHIPPING
+
+namespace
+{
+	void StressMoveCommand(
+		const TArray<FString>& Arguments,
+		UWorld* World)
+	{
+		if (!World || Arguments.IsEmpty())
+		{
+			return;
+		}
+
+		UAlgonaSimulationSubsystem* Simulation =
+			World->GetSubsystem<UAlgonaSimulationSubsystem>();
+
+		if (Simulation)
+		{
+			Simulation->SetStressMoveEnabled(
+				FCString::Atoi(*Arguments[0]) != 0);
+		}
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs GAlgonaP2StressMoveCommand(
+		TEXT("algona.P2.StressMove"),
+		TEXT("P2 measurement scenario: 1 keeps all squads moving through neighbouring rows, 0 stops issuing new orders."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
+			&StressMoveCommand),
+		ECVF_Cheat);
+}
+
+#endif
 
 bool UAlgonaSimulationSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 {
@@ -75,6 +119,9 @@ void UAlgonaSimulationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	SimulationTick = 0;
 	StateRevision = 0;
 	Metrics = FAlgonaSimulationMetrics();
+	MetricsReportWindow = FAlgonaMetricsReportWindow();
+	bStressMoveEnabled = false;
+	StressMoveDirections.Reset();
 
 	if (!IsAuthoritativeSimulationWorld())
 	{
@@ -125,6 +172,8 @@ void UAlgonaSimulationSubsystem::Deinitialize()
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	PendingMoveCommands.Reset();
+	bStressMoveEnabled = false;
+	StressMoveDirections.Reset();
 	UnitEntityConfig = nullptr;
 
 	Metrics.EntityCount = 0;
@@ -158,6 +207,8 @@ void UAlgonaSimulationSubsystem::Tick(float DeltaTime)
 	Metrics.BacklogSeconds = FixedStepAccumulator.GetBacklogSeconds();
 	Metrics.OverloadedFrameCount =
 		FixedStepAccumulator.GetOverloadedFrameCount();
+
+	UpdateMetricsReport(Metrics.LastExecutedStepsThisFrame);
 }
 
 TStatId UAlgonaSimulationSubsystem::GetStatId() const
@@ -277,6 +328,164 @@ int32 UAlgonaSimulationSubsystem::SubmitMoveAllSquadsByOffset(
 	}
 
 	return SubmittedCommands;
+}
+
+void UAlgonaSimulationSubsystem::SetStressMoveEnabled(bool bEnabled)
+{
+	if (!IsAuthoritativeSimulationWorld())
+	{
+		return;
+	}
+
+	bStressMoveEnabled = bEnabled && !Squads.IsEmpty();
+	StressMoveDirections.Reset();
+
+	if (bStressMoveEnabled)
+	{
+		// Чётные ряды отрядов идут в +Y, нечётные в -Y, поэтому соседние
+		// ряды проходят друг сквозь друга.
+		StressMoveDirections.SetNum(Squads.Num());
+
+		for (int32 SquadIndex = 0;
+			SquadIndex < Squads.Num();
+			++SquadIndex)
+		{
+			const int32 Row =
+				SquadIndex / AlgonaSimulationDefaults::SquadsPerRow;
+
+			StressMoveDirections[SquadIndex] =
+				(Row % 2 == 0) ? 1 : -1;
+		}
+	}
+
+	UE_LOG(
+		LogAlgonaSimulation,
+		Display,
+		TEXT("[P2 StressMove] %s squads=%d distance=%.0f cm"),
+		bStressMoveEnabled ? TEXT("ON") : TEXT("OFF"),
+		Squads.Num(),
+		AlgonaSimulationDefaults::StressMoveDistanceCm);
+}
+
+void UAlgonaSimulationSubsystem::SubmitStressMoveCommands()
+{
+	// Отряд, завершивший проход, получает приказ идти обратно.
+	// Команда разбирается в этом же шаге, поэтому повторной подачи не будет.
+	const int32 SquadCount = FMath::Min(
+		Squads.Num(),
+		StressMoveDirections.Num());
+
+	for (int32 SquadIndex = 0;
+		SquadIndex < SquadCount;
+		++SquadIndex)
+	{
+		const FAlgonaSquad& Squad = Squads[SquadIndex];
+
+		if (Squad.bHasMoveTarget)
+		{
+			continue;
+		}
+
+		int8& Direction = StressMoveDirections[SquadIndex];
+
+		SubmitMoveSquadCommand(
+			Squad.SquadId,
+			Squad.AnchorLocation
+				+ FVector(
+					0.0,
+					Direction * AlgonaSimulationDefaults::StressMoveDistanceCm,
+					0.0));
+
+		Direction = -Direction;
+	}
+}
+
+void UAlgonaSimulationSubsystem::AccumulateMetricsReportStep()
+{
+	FAlgonaMetricsReportWindow& Window = MetricsReportWindow;
+
+	++Window.StepCount;
+	Window.StepMillisecondsSum += Metrics.LastStepMilliseconds;
+	Window.StepMillisecondsMax = FMath::Max(
+		Window.StepMillisecondsMax,
+		Metrics.LastStepMilliseconds);
+	Window.CommandsMillisecondsSum += Metrics.LastCommandsMilliseconds;
+	Window.SquadsMillisecondsSum += Metrics.LastSquadsMilliseconds;
+	Window.UnitsMillisecondsSum += Metrics.LastUnitsMilliseconds;
+	Window.MovedEntitiesSum += Metrics.LastMovedEntities;
+}
+
+void UAlgonaSimulationSubsystem::UpdateMetricsReport(
+	int32 ExecutedStepsThisFrame)
+{
+	const double ReportSeconds = static_cast<double>(
+		CVarAlgonaP2MetricsReportSeconds.GetValueOnGameThread());
+
+	FAlgonaMetricsReportWindow& Window = MetricsReportWindow;
+
+	if (ReportSeconds <= 0.0)
+	{
+		Window = FAlgonaMetricsReportWindow();
+		return;
+	}
+
+	const double NowSeconds = FPlatformTime::Seconds();
+
+	// Начало нового окна. Шаги, выполненные до этого момента, отбрасываются,
+	// чтобы окно содержало только полные кадры.
+	auto StartWindow = [this, &Window, NowSeconds]()
+	{
+		Window = FAlgonaMetricsReportWindow();
+		Window.StartWallSeconds = NowSeconds;
+		Window.StartOverloadedFrameCount =
+			FixedStepAccumulator.GetOverloadedFrameCount();
+	};
+
+	if (Window.StartWallSeconds <= 0.0)
+	{
+		StartWindow();
+		return;
+	}
+
+	Window.MaxStepsPerFrame = FMath::Max(
+		Window.MaxStepsPerFrame,
+		ExecutedStepsThisFrame);
+
+	const double WindowSeconds = NowSeconds - Window.StartWallSeconds;
+	if (WindowSeconds < ReportSeconds)
+	{
+		return;
+	}
+
+	// Одна строка сводки за окно: частота шагов, средняя и худшая стоимость
+	// одного шага, разбивка по стадиям и состояние накопителя шагов.
+	const double InverseStepCount = Window.StepCount > 0
+		? 1.0 / static_cast<double>(Window.StepCount)
+		: 0.0;
+
+	UE_LOG(
+		LogAlgonaSimulation,
+		Display,
+		TEXT("[P2 Metrics] units=%d window=%.2fs steps=%d (%.1f Hz) maxSteps/frame=%d | step avg=%.2f max=%.2f ms | commands=%.2f squads=%.2f units=%.2f ms | moved avg=%lld | backlog=%.3fs overloaded+=%llu | stress=%s"),
+		UnitEntities.Num(),
+		WindowSeconds,
+		Window.StepCount,
+		static_cast<double>(Window.StepCount) / WindowSeconds,
+		Window.MaxStepsPerFrame,
+		Window.StepMillisecondsSum * InverseStepCount,
+		Window.StepMillisecondsMax,
+		Window.CommandsMillisecondsSum * InverseStepCount,
+		Window.SquadsMillisecondsSum * InverseStepCount,
+		Window.UnitsMillisecondsSum * InverseStepCount,
+		static_cast<long long>(
+			static_cast<double>(Window.MovedEntitiesSum) * InverseStepCount),
+		FixedStepAccumulator.GetBacklogSeconds(),
+		static_cast<unsigned long long>(
+			FixedStepAccumulator.GetOverloadedFrameCount()
+				- Window.StartOverloadedFrameCount),
+		bStressMoveEnabled ? TEXT("ON") : TEXT("OFF"));
+
+	StartWindow();
 }
 
 void UAlgonaSimulationSubsystem::InitializeQueries()

@@ -27,6 +27,12 @@ namespace AlgonaSimulationDefaults
 	inline constexpr int32 SquadSize = 50;
 	inline constexpr double SpatialGridCellSizeCm = 10000.0;
 
+	// Стартовая раскладка армии: число отрядов в одном ряду вдоль X.
+	inline constexpr int32 SquadsPerRow = 40;
+
+	// Стресс-сценарий замеров P2: длина одного прохода ряда отрядов по Y, см.
+	inline constexpr double StressMoveDistanceCm = 4000.0;
+
 	// Dormant squad-level spatial index. Change only this value to re-enable
 	// population and updates when squad-level spatial queries are needed again.
 	inline constexpr bool EnableSquadSpatialGrid = false;
@@ -151,11 +157,36 @@ public:
 
 	int32 SubmitMoveAllSquadsByOffset(const FVector& Offset);
 
+	/**
+	 * Инструмент замеров P2, не игровая механика.
+	 * Соседние ряды отрядов постоянно ходят навстречу друг другу и
+	 * разворачиваются по прибытии, поэтому двигаются все Unit.
+	 * Приказы идут через обычную очередь команд. Включается консольной
+	 * командой algona.P2.StressMove, которая есть только в не-shipping сборках.
+	 */
+	void SetStressMoveEnabled(bool bEnabled);
+
 private:
 	struct FAlgonaSquadEntityRange
 	{
 		int32 FirstUnitIndex = INDEX_NONE;
 		int32 Count = 0;
+	};
+
+	// Накопленная статистика шагов за одно окно реального времени.
+	// Используется только для периодического отчёта в лог.
+	struct FAlgonaMetricsReportWindow
+	{
+		double StartWallSeconds = 0.0;
+		uint64 StartOverloadedFrameCount = 0;
+		int32 StepCount = 0;
+		int32 MaxStepsPerFrame = 0;
+		double StepMillisecondsSum = 0.0;
+		double StepMillisecondsMax = 0.0;
+		double CommandsMillisecondsSum = 0.0;
+		double SquadsMillisecondsSum = 0.0;
+		double UnitsMillisecondsSum = 0.0;
+		int64 MovedEntitiesSum = 0;
 	};
 
 	bool IsSquadSpatialGridEnabled() const
@@ -183,6 +214,11 @@ private:
 		int32 SlotIndex) const;
 
 	bool IsAuthoritativeSimulationWorld() const;
+
+	void SubmitStressMoveCommands();
+
+	void AccumulateMetricsReportStep();
+	void UpdateMetricsReport(int32 ExecutedStepsThisFrame);
 
 	FAlgonaFixedStepAccumulator FixedStepAccumulator{
 		AlgonaSimulationDefaults::FixedStepSeconds,
@@ -217,4 +253,11 @@ private:
 	TArray<FAlgonaSquad> Squads;
 	TArray<FAlgonaSquadEntityRange> SquadEntityRanges;
 	TArray<FAlgonaSquadMoveCommand> PendingMoveCommands;
+
+	FAlgonaMetricsReportWindow MetricsReportWindow;
+
+	// Состояние стресс-сценария: направление следующего прохода по Y
+	// (+1 или -1) для каждого SquadId.
+	bool bStressMoveEnabled = false;
+	TArray<int8> StressMoveDirections;
 };
