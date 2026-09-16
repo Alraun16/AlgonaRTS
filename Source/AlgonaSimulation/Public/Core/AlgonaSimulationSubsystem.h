@@ -10,7 +10,6 @@
 
 #include "CoreMinimal.h"
 #include "Mass/EntityHandle.h"
-#include "MassEntityQuery.h"
 #include "Subsystems/WorldSubsystem.h"
 
 #include "AlgonaSimulationSubsystem.generated.h"
@@ -208,33 +207,33 @@ private:
 		double StepMillisecondsMax = 0.0;
 		double CommandsMillisecondsSum = 0.0;
 		double SquadsMillisecondsSum = 0.0;
-		double GatherMillisecondsSum = 0.0;
 		double SteerMillisecondsSum = 0.0;
-		double ScatterMillisecondsSum = 0.0;
+		double UnitGridMillisecondsSum = 0.0;
 		int64 MovedEntitiesSum = 0;
 	};
 
-	// Плоские массивы конвейера движения Unit (Structure of Arrays):
-	// отдельный массив на каждое поле, индекс = UnitId - 1.
-	// Переиспользуются между тиками, чтобы не выделять память каждый шаг.
-	struct FAlgonaUnitMovementBuffers
+	// Состояние Unit в плоских массивах (Structure of Arrays): отдельный массив
+	// на каждое поле, индекс = UnitId - 1.
+	// Это источник истины для движения Unit. Mass-сущность Unit хранит только
+	// идентичность (UnitId и тег). У каждого поля ровно один хозяин.
+	struct FAlgonaUnitStateArrays
 	{
-		// Собираются из Mass в начале конвейера.
+		// Авторитетное состояние, переживает тики.
 		TArray<FVector> Positions;
 		TArray<float> FacingYaws;
+		TArray<FVector2f> Velocities;
 		TArray<int32> SquadIds;
 		TArray<int32> SlotIndices;
 
-		// Результат L2 и фактическая скорость. Сейчас они равны; на шаге
-		// инерции между ними появится ограничение ускорения.
+		// Рабочие данные текущего тика.
+		// Желаемая скорость — результат L2. На шаге инерции между ней и
+		// фактической скоростью появится ограничение ускорения.
 		TArray<FVector2f> DesiredVelocities;
-		TArray<FVector2f> Velocities;
 
-		// 1 — позиция или поворот изменились, Transform нужно записать.
+		// 1 — позиция или поворот изменились в этом тике.
 		TArray<uint8> ChangedFlags;
 
-		// 1 — Unit перешёл в другую ячейку Unit Grid. Сетка обновляется
-		// последовательно после параллельной записи.
+		// 1 — Unit перешёл в другую ячейку Unit Grid.
 		TArray<uint8> CellChangedFlags;
 	};
 
@@ -253,13 +252,20 @@ private:
 		return AlgonaSimulationDefaults::EnableSquadSpatialGrid;
 	}
 
-	void InitializeQueries();
-
 	bool CreateUnits(
 		int32 UnitCount,
 		int32 RequestedSquadSize);
 	bool CreateSquads(int32 RequestedSquadSize);
 	void DestroyUnits();
+
+	// Задаёт размер массивов состояния Unit и заполняет их значениями
+	// по умолчанию.
+	void InitializeUnitState(int32 UnitCount);
+
+	// Добавляет снимок одного Unit, прочитанный из массивов состояния.
+	void AppendUnitSnapshot(
+		uint32 UnitId,
+		TArray<FAlgonaUnitSnapshot>& OutSnapshots) const;
 
 	/**
 	 * Проверяет связь Squad <-> Unit: число активных Unit равно числу слотов,
@@ -272,14 +278,13 @@ private:
 	void ProcessPendingCommands();
 	bool UpdateSquadCenters(float DeltaTime);
 
-	// Конвейер движения Unit (AlgonaSimulationMovement.cpp).
-	// bParallel — выполнять стадию на рабочих потоках; результат одинаков.
+	// Движение Unit (AlgonaSimulationMovement.cpp).
+	// bParallel — считать на рабочих потоках; результат одинаков.
 	bool IsParallelMovementEnabled() const;
-	// Возвращает число собранных Unit.
-	int32 GatherUnitMovementState(bool bParallel);
 	void SteerUnits(float DeltaTime, bool bParallel);
-	// Возвращает число Unit, у которых изменились позиция или поворот.
-	int32 ScatterUnitMovementState(bool bParallel);
+	// Обновляет Unit Grid для Unit, сменивших ячейку. Возвращает число Unit,
+	// у которых в этом тике изменились позиция или поворот.
+	int32 UpdateUnitGrid();
 
 	FVector ComputeSlotWorldPosition(
 		const FAlgonaSquad& Squad,
@@ -309,9 +314,6 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UMassEntityConfigAsset> UnitEntityConfig = nullptr;
 
-	TUniquePtr<FMassEntityQuery> UnitUpdateQuery;
-	TUniquePtr<FMassEntityQuery> UnitSnapshotQuery;
-
 	// Kept dormant and empty while EnableSquadSpatialGrid is false.
 	FAlgonaSquadSpatialGrid SquadSpatialGrid{
 		AlgonaSimulationDefaults::SpatialGridCellSizeCm};
@@ -328,8 +330,8 @@ private:
 
 	FAlgonaMetricsReportWindow MetricsReportWindow;
 
-	// Рабочие массивы конвейера движения Unit.
-	FAlgonaUnitMovementBuffers UnitMovementBuffers;
+	// Состояние Unit (источник истины для движения) и данные Squad текущего тика.
+	FAlgonaUnitStateArrays UnitState;
 	TArray<FAlgonaSquadMovementFrame> SquadMovementFrames;
 
 	// Состояние стресс-сценария: направление следующего прохода по Y

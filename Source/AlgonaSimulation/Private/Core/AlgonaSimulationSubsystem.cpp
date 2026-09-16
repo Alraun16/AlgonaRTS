@@ -147,11 +147,6 @@ void UAlgonaSimulationSubsystem::Initialize(
 		Collection.InitializeDependency<UMassEntitySubsystem>();
 	MassSpawnerSubsystem =
 		Collection.InitializeDependency<UMassSpawnerSubsystem>();
-
-	if (MassEntitySubsystem)
-	{
-		InitializeQueries();
-	}
 }
 
 void UAlgonaSimulationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
@@ -216,12 +211,10 @@ void UAlgonaSimulationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 
 void UAlgonaSimulationSubsystem::Deinitialize()
 {
-	UnitUpdateQuery.Reset();
-	UnitSnapshotQuery.Reset();
-
 	// During world teardown Mass can already be deinitialized, so do not call
 	// DestroyUnits() here. The world owns and tears down the entity manager.
 	UnitEntities.Reset();
+	UnitState = FAlgonaUnitStateArrays();
 	Squads.Reset();
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
@@ -292,16 +285,9 @@ int32 UAlgonaSimulationSubsystem::ExportUnitSnapshots(
 
 	OutSnapshots.Reset();
 
-	if (!MassEntitySubsystem
-		|| !UnitSnapshotQuery
-		|| MaxEntities <= 0)
-	{
-		return 0;
-	}
-
 	const int32 SafeMaxEntities = FMath::Min(
 		MaxEntities,
-		UnitEntities.Num());
+		UnitState.Positions.Num());
 
 	if (SafeMaxEntities <= 0)
 	{
@@ -310,35 +296,12 @@ int32 UAlgonaSimulationSubsystem::ExportUnitSnapshots(
 
 	OutSnapshots.Reserve(SafeMaxEntities);
 
-	FMassEntityManager& EntityManager =
-		MassEntitySubsystem->GetMutableEntityManager();
-	FMassExecutionContext ExecutionContext =
-		EntityManager.CreateExecutionContext(0.0f);
-
-	UnitSnapshotQuery->ForEachEntityChunk(
-		ExecutionContext,
-		[&OutSnapshots, SafeMaxEntities](FMassExecutionContext& Context)
-		{
-			const TConstArrayView<FAlgonaUnitIdFragment> Ids =
-				Context.GetFragmentView<FAlgonaUnitIdFragment>();
-			const TConstArrayView<FTransformFragment> Transforms =
-				Context.GetFragmentView<FTransformFragment>();
-
-			for (int32 Index = 0;
-				Index < Context.GetNumEntities()
-					&& OutSnapshots.Num() < SafeMaxEntities;
-				++Index)
-			{
-				const FTransform& Transform =
-					Transforms[Index].GetTransform();
-
-				FAlgonaUnitSnapshot& Snapshot =
-					OutSnapshots.AddDefaulted_GetRef();
-				Snapshot.EntityId = Ids[Index].Value;
-				Snapshot.Position = Transform.GetLocation();
-				Snapshot.Facing = Transform.GetRotation();
-			}
-		});
+	for (int32 UnitIndex = 0; UnitIndex < SafeMaxEntities; ++UnitIndex)
+	{
+		AppendUnitSnapshot(
+			static_cast<uint32>(UnitIndex + 1),
+			OutSnapshots);
+	}
 
 	return OutSnapshots.Num();
 }
@@ -485,9 +448,8 @@ void UAlgonaSimulationSubsystem::AccumulateMetricsReportStep()
 		Metrics.LastStepMilliseconds);
 	Window.CommandsMillisecondsSum += Metrics.LastCommandsMilliseconds;
 	Window.SquadsMillisecondsSum += Metrics.LastSquadsMilliseconds;
-	Window.GatherMillisecondsSum += Metrics.LastGatherMilliseconds;
 	Window.SteerMillisecondsSum += Metrics.LastSteerMilliseconds;
-	Window.ScatterMillisecondsSum += Metrics.LastScatterMilliseconds;
+	Window.UnitGridMillisecondsSum += Metrics.LastUnitGridMilliseconds;
 	Window.MovedEntitiesSum += Metrics.LastMovedEntities;
 }
 
@@ -542,7 +504,7 @@ void UAlgonaSimulationSubsystem::UpdateMetricsReport(
 	UE_LOG(
 		LogAlgonaSimulation,
 		Display,
-		TEXT("[P2 Metrics] units=%d window=%.2fs steps=%d (%.1f Hz) maxSteps/frame=%d | step avg=%.2f max=%.2f ms | commands=%.2f squads=%.2f gather=%.2f steer=%.2f scatter=%.2f ms | changed avg=%lld | backlog=%.3fs overloaded+=%llu | parallel=%s workers=%d | stress=%s"),
+		TEXT("[P2 Metrics] units=%d window=%.2fs steps=%d (%.1f Hz) maxSteps/frame=%d | step avg=%.2f max=%.2f ms | commands=%.2f squads=%.2f steer=%.2f grid=%.2f ms | changed avg=%lld | backlog=%.3fs overloaded+=%llu | parallel=%s workers=%d | stress=%s"),
 		UnitEntities.Num(),
 		WindowSeconds,
 		Window.StepCount,
@@ -552,9 +514,8 @@ void UAlgonaSimulationSubsystem::UpdateMetricsReport(
 		Window.StepMillisecondsMax,
 		Window.CommandsMillisecondsSum * InverseStepCount,
 		Window.SquadsMillisecondsSum * InverseStepCount,
-		Window.GatherMillisecondsSum * InverseStepCount,
 		Window.SteerMillisecondsSum * InverseStepCount,
-		Window.ScatterMillisecondsSum * InverseStepCount,
+		Window.UnitGridMillisecondsSum * InverseStepCount,
 		static_cast<long long>(
 			static_cast<double>(Window.MovedEntitiesSum) * InverseStepCount),
 		FixedStepAccumulator.GetBacklogSeconds(),
@@ -566,40 +527,6 @@ void UAlgonaSimulationSubsystem::UpdateMetricsReport(
 		bStressMoveEnabled ? TEXT("ON") : TEXT("OFF"));
 
 	StartWindow();
-}
-
-void UAlgonaSimulationSubsystem::InitializeQueries()
-{
-	FMassEntityManager& EntityManager =
-		MassEntitySubsystem->GetMutableEntityManager();
-
-	UnitUpdateQuery =
-		MakeUnique<FMassEntityQuery>(EntityManager.AsShared());
-	UnitUpdateQuery->AddRequirement<FTransformFragment>(
-		EMassFragmentAccess::ReadWrite);
-	UnitUpdateQuery->AddRequirement<FAlgonaUnitIdFragment>(
-		EMassFragmentAccess::ReadOnly);
-	UnitUpdateQuery->AddRequirement<FAlgonaSquadMemberFragment>(
-		EMassFragmentAccess::ReadOnly);
-	UnitUpdateQuery->AddRequirement<FAlgonaUnitMovementFragment>(
-		EMassFragmentAccess::ReadWrite);
-	UnitUpdateQuery->AddTagRequirement<FAlgonaUnitTag>(
-		EMassFragmentPresence::All);
-
-	// Конвейер движения не отправляет отложенные команды Mass, поэтому
-	// параллельным задачам не нужны собственные буферы команд.
-	UnitUpdateQuery->SetParallelCommandBufferEnabled(false);
-
-	UnitSnapshotQuery =
-		MakeUnique<FMassEntityQuery>(EntityManager.AsShared());
-	UnitSnapshotQuery->AddRequirement<FAlgonaUnitIdFragment>(
-		EMassFragmentAccess::ReadOnly);
-	UnitSnapshotQuery->AddRequirement<FTransformFragment>(
-		EMassFragmentAccess::ReadOnly);
-	UnitSnapshotQuery->AddRequirement<FAlgonaSquadMemberFragment>(
-		EMassFragmentAccess::ReadOnly);
-	UnitSnapshotQuery->AddTagRequirement<FAlgonaUnitTag>(
-		EMassFragmentPresence::All);
 }
 
 bool UAlgonaSimulationSubsystem::IsAuthoritativeSimulationWorld() const

@@ -5,13 +5,11 @@
 
 #include "AlgonaUnitFragments.generated.h"
 
-/** Gameplay movement state of one authoritative unit entity. */
-UENUM()
-enum class EAlgonaUnitMovementState : uint8
-{
-	Idle,
-	Moving
-};
+/*
+ * Mass-сущность Unit хранит только идентичность. Состояние Unit (позиция,
+ * поворот, скорость, SquadId, SlotIndex) хранится в плоских массивах
+ * Simulation Subsystem — это источник истины для движения (ADR P2, шаг 6a).
+ */
 
 /** Marks an entity as an Algona combat unit. */
 USTRUCT()
@@ -27,32 +25,4 @@ struct ALGONASIMULATION_API FAlgonaUnitIdFragment : public FMassFragment
 	GENERATED_BODY()
 
 	uint32 Value = 0;
-};
-
-/** Squad membership and stable formation slot. */
-USTRUCT()
-struct ALGONASIMULATION_API FAlgonaSquadMemberFragment : public FMassFragment
-{
-	GENERATED_BODY()
-
-	int32 SquadId = INDEX_NONE;
-	int32 SlotIndex = INDEX_NONE;
-};
-
-/**
- * Authoritative movement state.
- * Idle and moving units remain the same Mass entity and archetype.
- */
-USTRUCT()
-struct ALGONASIMULATION_API FAlgonaUnitMovementFragment : public FMassFragment
-{
-	GENERATED_BODY()
-
-	FVector Velocity = FVector::ZeroVector;
-	uint64 LastProcessedSimulationTick = 0;
-	EAlgonaUnitMovementState State = EAlgonaUnitMovementState::Idle;
-
-	// Направление взгляда Unit на плоскости (yaw), радианы.
-	// Поворот Transform строится из этого значения.
-	float FacingYawRadians = 0.0f;
 };

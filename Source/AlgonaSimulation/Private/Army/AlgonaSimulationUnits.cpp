@@ -4,10 +4,8 @@
 #include "Army/AlgonaUnitTrait.h"
 
 #include "Engine/World.h"
-#include "Mass/EntityFragments.h"
 #include "MassEntityConfigAsset.h"
 #include "MassEntityManager.h"
-#include "MassExecutionContext.h"
 #include "MassEntitySubsystem.h"
 #include "MassEntityTemplate.h"
 #include "MassEntityView.h"
@@ -131,6 +129,7 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 	Squads.Reserve(SquadCount);
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
+	InitializeUnitState(UnitEntities.Num());
 
 	int32 UnitIndex = 0;
 
@@ -147,8 +146,8 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 			UnitEntities.Num() - UnitIndex);
 
 		// Состав заполняется заранее: UnitId детерминирован (номер Unit + 1),
-		// поэтому раскладку можно построить до записи фрагментов. Раскладка
-		// строится тем же путём, что и при Reform.
+		// поэтому раскладку можно построить до записи состояния Unit.
+		// Раскладка строится тем же путём, что и при Reform.
 		Squad.FormationParams = ReferenceParams;
 		Squad.ActiveUnitIds.Reserve(MemberCount);
 
@@ -178,8 +177,12 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 			0.0);
 		Squad.TargetCenterLocation = Squad.CenterLocation;
 
-		// Фрагменты Unit заполняются по слотам: слот SlotIndex занимает Unit
-		// ActiveUnitIds[SlotIndex] = UnitIndex + 1.
+		// Unit стартуют в своих слотах и смотрят по направлению Squad.
+		const FVector SquadForward = Squad.GetForwardDirection2D();
+		const float SquadFacingYaw = static_cast<float>(
+			FMath::Atan2(SquadForward.Y, SquadForward.X));
+
+		// Слот SlotIndex занимает Unit ActiveUnitIds[SlotIndex] = UnitIndex + 1.
 		for (int32 SlotIndex = 0;
 			SlotIndex < MemberCount;
 			++SlotIndex)
@@ -197,41 +200,23 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 				return false;
 			}
 
+			// Mass-сущность хранит только идентичность Unit.
 			FMassEntityView EntityView(EntityManager, UnitEntity);
 
 			FAlgonaUnitIdFragment& Id =
 				EntityView.GetFragmentData<FAlgonaUnitIdFragment>();
 			Id.Value = static_cast<uint32>(UnitIndex + 1);
 
-			FAlgonaSquadMemberFragment& Member =
-				EntityView.GetFragmentData<FAlgonaSquadMemberFragment>();
-			Member.SquadId = Squad.SquadId;
-			Member.SlotIndex = SlotIndex;
-
-			FAlgonaUnitMovementFragment& Movement =
-				EntityView.GetFragmentData<FAlgonaUnitMovementFragment>();
-			// Unit стартует в своём слоте и смотрит по направлению Squad.
-			const FVector SquadForward = Squad.GetForwardDirection2D();
-
-			Movement.Velocity = FVector::ZeroVector;
-			Movement.LastProcessedSimulationTick = 0;
-			Movement.State = EAlgonaUnitMovementState::Idle;
-			Movement.FacingYawRadians = static_cast<float>(
-				FMath::Atan2(SquadForward.Y, SquadForward.X));
-
-			FTransform InitialTransform = FTransform::Identity;
-			InitialTransform.SetLocation(
-				ComputeSlotWorldPosition(Squad, SlotIndex));
-			InitialTransform.SetRotation(
-				FQuat(FVector::UpVector, Movement.FacingYawRadians));
-
-			FTransformFragment& Transform =
-				EntityView.GetFragmentData<FTransformFragment>();
-			Transform.SetTransform(InitialTransform);
+			// Состояние Unit — в плоских массивах по индексу UnitId - 1.
+			UnitState.Positions[UnitIndex] =
+				ComputeSlotWorldPosition(Squad, SlotIndex);
+			UnitState.FacingYaws[UnitIndex] = SquadFacingYaw;
+			UnitState.SquadIds[UnitIndex] = Squad.SquadId;
+			UnitState.SlotIndices[UnitIndex] = SlotIndex;
 
 			UnitSpatialGrid.AddUnit(
 				Id.Value,
-				InitialTransform.GetLocation());
+				UnitState.Positions[UnitIndex]);
 
 			++UnitIndex;
 		}
@@ -257,6 +242,7 @@ void UAlgonaSimulationSubsystem::DestroyUnits()
 	}
 
 	UnitEntities.Reset();
+	UnitState = FAlgonaUnitStateArrays();
 	Squads.Reset();
 	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
@@ -269,6 +255,25 @@ void UAlgonaSimulationSubsystem::DestroyUnits()
 	Metrics.SquadCount = 0;
 }
 
+void UAlgonaSimulationSubsystem::AppendUnitSnapshot(
+	uint32 UnitId,
+	TArray<FAlgonaUnitSnapshot>& OutSnapshots) const
+{
+	const int32 UnitIndex = static_cast<int32>(UnitId) - 1;
+
+	if (UnitId == 0 || !UnitState.Positions.IsValidIndex(UnitIndex))
+	{
+		return;
+	}
+
+	FAlgonaUnitSnapshot& Snapshot = OutSnapshots.AddDefaulted_GetRef();
+	Snapshot.EntityId = UnitId;
+	Snapshot.Position = UnitState.Positions[UnitIndex];
+	Snapshot.Facing = FQuat(
+		FVector::UpVector,
+		UnitState.FacingYaws[UnitIndex]);
+}
+
 int32 UAlgonaSimulationSubsystem::ExportUnitSnapshotsForSquads(
 	TConstArrayView<int32> SquadIds,
 	TArray<FAlgonaUnitSnapshot>& OutSnapshots,
@@ -277,18 +282,12 @@ int32 UAlgonaSimulationSubsystem::ExportUnitSnapshotsForSquads(
 	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_ExportSelectedSquadSnapshots);
 
 	OutSnapshots.Reset();
-	if (!MassEntitySubsystem
-		|| !UnitSnapshotQuery
-		|| SquadIds.IsEmpty()
-		|| MaxEntities <= 0)
+
+	if (SquadIds.IsEmpty() || MaxEntities <= 0)
 	{
 		return 0;
 	}
 
-	// Count complete valid squads first. This gives us the exact selected
-	// unit count before choosing the cheaper export strategy.
-	int32 SelectedUnitCount = 0;
-	int32 AcceptedSquadCount = 0;
 	for (const int32 SquadId : SquadIds)
 	{
 		if (!Squads.IsValidIndex(SquadId)
@@ -297,149 +296,19 @@ int32 UAlgonaSimulationSubsystem::ExportUnitSnapshotsForSquads(
 			continue;
 		}
 
-		const int32 SquadUnitCount = Squads[SquadId].ActiveUnitIds.Num();
-		if (SquadUnitCount <= 0
-			|| SelectedUnitCount + SquadUnitCount > MaxEntities)
+		const TArray<uint32>& ActiveUnitIds = Squads[SquadId].ActiveUnitIds;
+
+		// Squad экспортируется только целиком.
+		if (OutSnapshots.Num() + ActiveUnitIds.Num() > MaxEntities)
 		{
 			break;
 		}
 
-		SelectedUnitCount += SquadUnitCount;
-		++AcceptedSquadCount;
-	}
-
-	if (SelectedUnitCount <= 0 || AcceptedSquadCount <= 0)
-	{
-		return 0;
-	}
-
-	OutSnapshots.Reserve(SelectedUnitCount);
-
-	FMassEntityManager& EntityManager =
-		MassEntitySubsystem->GetMutableEntityManager();
-
-	// Existing P1 squad-export crossover: direct entity reads win for a small
-	// selected set; one sequential Mass pass wins from roughly 6% upward.
-	constexpr int32 FullScanRatioNumerator = 3;
-	constexpr int32 FullScanRatioDenominator = 50;
-	const bool bUseFilteredFullScan =
-		static_cast<int64>(SelectedUnitCount) * FullScanRatioDenominator
-		>= static_cast<int64>(UnitEntities.Num()) * FullScanRatioNumerator;
-
-	if (!bUseFilteredFullScan)
-	{
-		TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_ExportSelectedSquads_Direct);
-
-		int32 ProcessedSquadCount = 0;
-		for (const int32 SquadId : SquadIds)
+		for (const uint32 UnitId : ActiveUnitIds)
 		{
-			if (ProcessedSquadCount >= AcceptedSquadCount)
-			{
-				break;
-			}
-
-			if (!Squads.IsValidIndex(SquadId)
-				|| Squads[SquadId].SquadId != SquadId)
-			{
-				continue;
-			}
-
-			const TArray<uint32>& ActiveUnitIds =
-				Squads[SquadId].ActiveUnitIds;
-			if (ActiveUnitIds.IsEmpty())
-			{
-				continue;
-			}
-
-			++ProcessedSquadCount;
-
-			for (const uint32 UnitId : ActiveUnitIds)
-			{
-				const int32 UnitIndex = static_cast<int32>(UnitId) - 1;
-				if (UnitId == 0 || !UnitEntities.IsValidIndex(UnitIndex))
-				{
-					continue;
-				}
-
-				const FMassEntityHandle Entity = UnitEntities[UnitIndex];
-				if (!EntityManager.IsEntityValid(Entity))
-				{
-					continue;
-				}
-
-				FMassEntityView EntityView(EntityManager, Entity);
-				const FTransformFragment& TransformFragment =
-					EntityView.GetFragmentData<FTransformFragment>();
-				const FTransform& Transform = TransformFragment.GetTransform();
-
-				FAlgonaUnitSnapshot& Snapshot =
-					OutSnapshots.AddDefaulted_GetRef();
-				Snapshot.EntityId = UnitId;
-				Snapshot.Position = Transform.GetLocation();
-				Snapshot.Facing = Transform.GetRotation();
-			}
+			AppendUnitSnapshot(UnitId, OutSnapshots);
 		}
-
-		return OutSnapshots.Num();
 	}
-
-	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_ExportSelectedSquads_FilteredFullScan);
-
-	TArray<uint8> SelectedSquadMask;
-	SelectedSquadMask.Init(0, Squads.Num());
-
-	int32 MaskedSquadCount = 0;
-	for (const int32 SquadId : SquadIds)
-	{
-		if (MaskedSquadCount >= AcceptedSquadCount)
-		{
-			break;
-		}
-
-		if (!Squads.IsValidIndex(SquadId)
-			|| Squads[SquadId].SquadId != SquadId
-			|| Squads[SquadId].ActiveUnitIds.IsEmpty())
-		{
-			continue;
-		}
-
-		SelectedSquadMask[SquadId] = 1;
-		++MaskedSquadCount;
-	}
-
-	FMassExecutionContext ExecutionContext =
-		EntityManager.CreateExecutionContext(0.0f);
-
-	UnitSnapshotQuery->ForEachEntityChunk(
-		ExecutionContext,
-		[&OutSnapshots, &SelectedSquadMask](FMassExecutionContext& Context)
-		{
-			const TConstArrayView<FAlgonaUnitIdFragment> Ids =
-				Context.GetFragmentView<FAlgonaUnitIdFragment>();
-			const TConstArrayView<FTransformFragment> Transforms =
-				Context.GetFragmentView<FTransformFragment>();
-			const TConstArrayView<FAlgonaSquadMemberFragment> Members =
-				Context.GetFragmentView<FAlgonaSquadMemberFragment>();
-
-			for (int32 Index = 0; Index < Context.GetNumEntities(); ++Index)
-			{
-				const int32 SquadId = Members[Index].SquadId;
-				if (!SelectedSquadMask.IsValidIndex(SquadId)
-					|| SelectedSquadMask[SquadId] == 0)
-				{
-					continue;
-				}
-
-				const FTransform& Transform =
-					Transforms[Index].GetTransform();
-
-				FAlgonaUnitSnapshot& Snapshot =
-					OutSnapshots.AddDefaulted_GetRef();
-				Snapshot.EntityId = Ids[Index].Value;
-				Snapshot.Position = Transform.GetLocation();
-				Snapshot.Facing = Transform.GetRotation();
-			}
-		});
 
 	return OutSnapshots.Num();
 }
@@ -454,171 +323,23 @@ int32 UAlgonaSimulationSubsystem::ExportUnitSnapshotsForUnitIds(
 
 	OutSnapshots.Reset();
 
-	if (!MassEntitySubsystem
-		|| !UnitSnapshotQuery
-		|| UnitIds.IsEmpty()
-		|| MaxEntities <= 0)
+	if (UnitIds.IsEmpty() || MaxEntities <= 0)
 	{
 		return 0;
 	}
 
-	const int32 SelectedUnitCount =
-		FMath::Min(
-			UnitIds.Num(),
-			MaxEntities);
-
-	if (SelectedUnitCount <= 0)
-	{
-		return 0;
-	}
+	const int32 SelectedUnitCount = FMath::Min(
+		UnitIds.Num(),
+		MaxEntities);
 
 	OutSnapshots.Reserve(SelectedUnitCount);
 
-	FMassEntityManager& EntityManager =
-		MassEntitySubsystem->GetMutableEntityManager();
-
-	// Measured in P2 with 20k and 100k units: direct reads win below about 7%
-	// of the army; one filtered sequential Mass pass wins from about 7% upward.
-	constexpr int32 FullScanRatioNumerator = 6;
-	constexpr int32 FullScanRatioDenominator = 100;
-
-	const bool bUseFilteredFullScan =
-		static_cast<int64>(SelectedUnitCount)
-			* FullScanRatioDenominator
-		>= static_cast<int64>(UnitEntities.Num())
-			* FullScanRatioNumerator;
-
-	if (!bUseFilteredFullScan)
+	// Состояние читается напрямую из плоских массивов по UnitId, поэтому
+	// отдельный путь с полным проходом по всем Unit не нужен.
+	for (int32 Index = 0; Index < SelectedUnitCount; ++Index)
 	{
-		TRACE_CPUPROFILER_EVENT_SCOPE(
-			AlgonaSimulation_ExportSelectedUnits_Direct);
-
-		for (int32 Index = 0;
-			Index < SelectedUnitCount;
-			++Index)
-		{
-			const uint32 UnitId =
-				UnitIds[Index];
-
-			if (UnitId == 0)
-			{
-				continue;
-			}
-
-			const int32 UnitIndex =
-				static_cast<int32>(UnitId - 1);
-
-			if (!UnitEntities.IsValidIndex(UnitIndex))
-			{
-				continue;
-			}
-
-			const FMassEntityHandle Entity =
-				UnitEntities[UnitIndex];
-
-			if (!EntityManager.IsEntityValid(Entity))
-			{
-				continue;
-			}
-
-			FMassEntityView EntityView(
-				EntityManager,
-				Entity);
-
-			const FTransformFragment& TransformFragment =
-				EntityView.GetFragmentData<FTransformFragment>();
-
-			const FTransform& Transform =
-				TransformFragment.GetTransform();
-
-			FAlgonaUnitSnapshot& Snapshot =
-				OutSnapshots.AddDefaulted_GetRef();
-
-			Snapshot.EntityId = UnitId;
-			Snapshot.Position = Transform.GetLocation();
-			Snapshot.Facing = Transform.GetRotation();
-		}
-
-		return OutSnapshots.Num();
+		AppendUnitSnapshot(UnitIds[Index], OutSnapshots);
 	}
-
-	TRACE_CPUPROFILER_EVENT_SCOPE(
-		AlgonaSimulation_ExportSelectedUnits_FilteredFullScan);
-
-	TArray<uint8> SelectedUnitMask;
-	SelectedUnitMask.Init(
-		0,
-		UnitEntities.Num());
-
-	for (int32 Index = 0;
-		Index < SelectedUnitCount;
-		++Index)
-	{
-		const uint32 UnitId =
-			UnitIds[Index];
-
-		if (UnitId == 0)
-		{
-			continue;
-		}
-
-		const int32 UnitIndex =
-			static_cast<int32>(UnitId - 1);
-
-		if (SelectedUnitMask.IsValidIndex(UnitIndex))
-		{
-			SelectedUnitMask[UnitIndex] = 1;
-		}
-	}
-
-	FMassExecutionContext ExecutionContext =
-		EntityManager.CreateExecutionContext(0.0f);
-
-	UnitSnapshotQuery->ForEachEntityChunk(
-		ExecutionContext,
-		[
-			&OutSnapshots,
-			&SelectedUnitMask
-		](FMassExecutionContext& Context)
-		{
-			const TConstArrayView<FAlgonaUnitIdFragment> Ids =
-				Context.GetFragmentView<FAlgonaUnitIdFragment>();
-
-			const TConstArrayView<FTransformFragment> Transforms =
-				Context.GetFragmentView<FTransformFragment>();
-
-			for (int32 Index = 0;
-				Index < Context.GetNumEntities();
-				++Index)
-			{
-				const uint32 UnitId =
-					Ids[Index].Value;
-
-				if (UnitId == 0)
-				{
-					continue;
-				}
-
-				const int32 UnitIndex =
-					static_cast<int32>(UnitId - 1);
-
-				if (!SelectedUnitMask.IsValidIndex(UnitIndex)
-					|| SelectedUnitMask[UnitIndex] == 0)
-				{
-					continue;
-				}
-
-				const FTransform& Transform =
-					Transforms[Index].GetTransform();
-
-				FAlgonaUnitSnapshot& Snapshot =
-					OutSnapshots.AddDefaulted_GetRef();
-
-				Snapshot.EntityId = UnitId;
-				Snapshot.Position = Transform.GetLocation();
-				Snapshot.Facing = Transform.GetRotation();
-			}
-		});
 
 	return OutSnapshots.Num();
 }
@@ -658,6 +379,18 @@ bool UAlgonaSimulationSubsystem::ValidateSquadMembership()
 
 	FMassEntityManager& EntityManager =
 		MassEntitySubsystem->GetMutableEntityManager();
+
+	// Массивы состояния покрывают ровно все Unit.
+	if (UnitState.Positions.Num() != UnitEntities.Num())
+	{
+		UE_LOG(
+			LogAlgonaSimulation,
+			Error,
+			TEXT("[P2 Squads] Unit state holds %d units, but %d units exist"),
+			UnitState.Positions.Num(),
+			UnitEntities.Num());
+		return false;
+	}
 
 	int32 CheckedUnitCount = 0;
 
@@ -699,25 +432,21 @@ bool UAlgonaSimulationSubsystem::ValidateSquadMembership()
 
 			// Обратная связь: Unit помнит тот же Squad и тот же слот.
 			// Если UnitId повторяется в двух слотах, одна из проверок не сойдётся.
-			FMassEntityView EntityView(
-				EntityManager,
-				UnitEntities[UnitIndex]);
+			const int32 StateSquadId = UnitState.SquadIds[UnitIndex];
+			const int32 StateSlotIndex = UnitState.SlotIndices[UnitIndex];
 
-			const FAlgonaSquadMemberFragment& Member =
-				EntityView.GetFragmentData<FAlgonaSquadMemberFragment>();
-
-			if (Member.SquadId != Squad.SquadId
-				|| Member.SlotIndex != SlotIndex)
+			if (StateSquadId != Squad.SquadId
+				|| StateSlotIndex != SlotIndex)
 			{
 				UE_LOG(
 					LogAlgonaSimulation,
 					Error,
-					TEXT("[P2 Squads] Unit %u is in squad %d slot %d, but its fragment says squad %d slot %d"),
+					TEXT("[P2 Squads] Unit %u is in squad %d slot %d, but its state says squad %d slot %d"),
 					UnitId,
 					Squad.SquadId,
 					SlotIndex,
-					Member.SquadId,
-					Member.SlotIndex);
+					StateSquadId,
+					StateSlotIndex);
 				return false;
 			}
 

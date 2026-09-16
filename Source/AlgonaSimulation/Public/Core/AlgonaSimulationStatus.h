@@ -30,10 +30,9 @@ struct ALGONASIMULATION_API FAlgonaSimulationMetrics
 	double LastCommandsMilliseconds = 0.0;
 	double LastSquadsMilliseconds = 0.0;
 
-	// Конвейер движения Unit: сбор из Mass, L2, запись в Mass и Unit Grid.
-	double LastGatherMilliseconds = 0.0;
+	// Движение Unit: L2 над плоскими массивами и обновление Unit Grid.
 	double LastSteerMilliseconds = 0.0;
-	double LastScatterMilliseconds = 0.0;
+	double LastUnitGridMilliseconds = 0.0;
 
 	// Конвейер движения последнего шага выполнялся на рабочих потоках.
 	bool bLastParallelMovement = false;

@@ -32,16 +32,9 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	const double SquadsEndSeconds =
 		FPlatformTime::Seconds();
 
-	// Стадии 3-5: конвейер движения Unit (AlgonaSimulationMovement.cpp).
-	// Режим читается один раз, чтобы все стадии шага шли в одном режиме.
+	// Стадии 3-4: движение Unit (AlgonaSimulationMovement.cpp).
+	// Режим читается один раз, чтобы весь шаг шёл в одном режиме.
 	const bool bParallelMovement = IsParallelMovementEnabled();
-
-	// Сбор состояния Unit из Mass в плоские массивы.
-	const int32 VisitedEntities =
-		GatherUnitMovementState(bParallelMovement);
-
-	const double GatherEndSeconds =
-		FPlatformTime::Seconds();
 
 	// L2: желаемая скорость, новая позиция и поворот каждого Unit.
 	SteerUnits(DeltaTime, bParallelMovement);
@@ -49,11 +42,10 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	const double SteerEndSeconds =
 		FPlatformTime::Seconds();
 
-	// Запись результата в Mass и Unit Grid.
-	const int32 ChangedEntities =
-		ScatterUnitMovementState(bParallelMovement);
+	// Обновление Unit Grid для Unit, сменивших ячейку.
+	const int32 ChangedEntities = UpdateUnitGrid();
 
-	const double ScatterEndSeconds =
+	const double UnitGridEndSeconds =
 		FPlatformTime::Seconds();
 
 	if (bSquadCentersChanged || ChangedEntities > 0)
@@ -64,18 +56,16 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	Metrics.SimulationTick = SimulationTick;
 	Metrics.EntityCount = UnitEntities.Num();
 	Metrics.SquadCount = Squads.Num();
-	Metrics.LastVisitedEntities = VisitedEntities;
+	Metrics.LastVisitedEntities = UnitState.Positions.Num();
 	Metrics.LastMovedEntities = ChangedEntities;
 	Metrics.LastCommandsMilliseconds =
 		(CommandsEndSeconds - StepStartSeconds) * 1000.0;
 	Metrics.LastSquadsMilliseconds =
 		(SquadsEndSeconds - CommandsEndSeconds) * 1000.0;
-	Metrics.LastGatherMilliseconds =
-		(GatherEndSeconds - SquadsEndSeconds) * 1000.0;
 	Metrics.LastSteerMilliseconds =
-		(SteerEndSeconds - GatherEndSeconds) * 1000.0;
-	Metrics.LastScatterMilliseconds =
-		(ScatterEndSeconds - SteerEndSeconds) * 1000.0;
+		(SteerEndSeconds - SquadsEndSeconds) * 1000.0;
+	Metrics.LastUnitGridMilliseconds =
+		(UnitGridEndSeconds - SteerEndSeconds) * 1000.0;
 	Metrics.bLastParallelMovement = bParallelMovement;
 	Metrics.LastStepMilliseconds =
 		(FPlatformTime::Seconds() - StepStartSeconds) * 1000.0;
@@ -109,7 +99,7 @@ void UAlgonaSimulationSubsystem::ProcessPendingCommands()
 
 		case EAlgonaSquadCommandType::SetRowLength:
 			// Меняются только позиции слотов, назначение Unit по слотам то же,
-			// поэтому фрагменты Unit обновлять не нужно.
+			// поэтому состояние Unit обновлять не нужно.
 			Squad.ApplyRowLengthOrder(Command.RowLength);
 			break;
 		}

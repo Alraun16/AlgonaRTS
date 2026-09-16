@@ -1,7 +1,6 @@
 #include "Army/AlgonaUnitTrait.h"
 
 #include "Army/AlgonaUnitFragments.h"
-#include "Mass/EntityFragments.h"
 #include "MassEntityTemplateRegistry.h"
 
 void UAlgonaUnitTrait::BuildTemplate(
@@ -10,9 +9,8 @@ void UAlgonaUnitTrait::BuildTemplate(
 {
 	(void)World;
 
-	BuildContext.AddFragment<FTransformFragment>();
+	// Только идентичность Unit. Состояние движения хранится в плоских
+	// массивах Simulation Subsystem.
 	BuildContext.AddFragment<FAlgonaUnitIdFragment>();
-	BuildContext.AddFragment<FAlgonaSquadMemberFragment>();
-	BuildContext.AddFragment<FAlgonaUnitMovementFragment>();
 	BuildContext.AddTag<FAlgonaUnitTag>();
 }

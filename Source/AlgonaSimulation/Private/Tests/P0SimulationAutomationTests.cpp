@@ -23,16 +23,6 @@ bool FAlgonaP0SimulationTypesTest::RunTest(const FString& Parameters)
 		FAlgonaUnitIdFragment::StaticStruct()->IsChildOf(
 			FMassFragment::StaticStruct()));
 
-	TestTrue(
-		TEXT("Squad membership is a Mass fragment"),
-		FAlgonaSquadMemberFragment::StaticStruct()->IsChildOf(
-			FMassFragment::StaticStruct()));
-
-	TestTrue(
-		TEXT("Movement state is a Mass fragment"),
-		FAlgonaUnitMovementFragment::StaticStruct()->IsChildOf(
-			FMassFragment::StaticStruct()));
-
 	const FAlgonaSquad DefaultSquad;
 	TestEqual(
 		TEXT("Default squad has no slots until its formation is built"),
@@ -42,12 +32,6 @@ bool FAlgonaP0SimulationTypesTest::RunTest(const FString& Parameters)
 		TEXT("Default squad has no active units"),
 		DefaultSquad.ActiveUnitIds.Num(),
 		0);
-
-	const FAlgonaUnitMovementFragment DefaultMovement;
-	TestEqual(
-		TEXT("Default unit state is Idle"),
-		DefaultMovement.State,
-		EAlgonaUnitMovementState::Idle);
 
 	TestFalse(
 		TEXT("Default squad has no active move target"),
