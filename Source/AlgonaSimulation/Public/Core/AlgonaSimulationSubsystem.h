@@ -208,8 +208,40 @@ private:
 		double StepMillisecondsMax = 0.0;
 		double CommandsMillisecondsSum = 0.0;
 		double SquadsMillisecondsSum = 0.0;
-		double UnitsMillisecondsSum = 0.0;
+		double GatherMillisecondsSum = 0.0;
+		double SteerMillisecondsSum = 0.0;
+		double ScatterMillisecondsSum = 0.0;
 		int64 MovedEntitiesSum = 0;
+	};
+
+	// Плоские массивы конвейера движения Unit (Structure of Arrays):
+	// отдельный массив на каждое поле, индекс = UnitId - 1.
+	// Переиспользуются между тиками, чтобы не выделять память каждый шаг.
+	struct FAlgonaUnitMovementBuffers
+	{
+		// Собираются из Mass в начале конвейера.
+		TArray<FVector> Positions;
+		TArray<float> FacingYaws;
+		TArray<int32> SquadIds;
+		TArray<int32> SlotIndices;
+
+		// Результат L2 и фактическая скорость. Сейчас они равны; на шаге
+		// инерции между ними появится ограничение ускорения.
+		TArray<FVector2f> DesiredVelocities;
+		TArray<FVector2f> Velocities;
+
+		// 1 — позиция или поворот изменились, Transform нужно записать.
+		TArray<uint8> ChangedFlags;
+	};
+
+	// Данные Squad, общие для всех его Unit в текущем тике.
+	struct FAlgonaSquadMovementFrame
+	{
+		FVector Forward = FVector::ForwardVector;
+		FVector Right = FVector::RightVector;
+		FVector2f CenterVelocity = FVector2f::ZeroVector;
+		float FacingYaw = 0.0f;
+		float UnitMaxSpeed = 0.0f;
 	};
 
 	bool IsSquadSpatialGridEnabled() const
@@ -235,9 +267,13 @@ private:
 	void RunSimulationStep(float DeltaTime);
 	void ProcessPendingCommands();
 	bool UpdateSquadCenters(float DeltaTime);
-	int32 UpdateUnits(
-		float DeltaTime,
-		int32& OutVisitedEntities);
+
+	// Конвейер движения Unit (AlgonaSimulationMovement.cpp).
+	// Возвращает число собранных Unit.
+	int32 GatherUnitMovementState();
+	void SteerUnits(float DeltaTime);
+	// Возвращает число Unit, у которых изменились позиция или поворот.
+	int32 ScatterUnitMovementState();
 
 	FVector ComputeSlotWorldPosition(
 		const FAlgonaSquad& Squad,
@@ -285,6 +321,10 @@ private:
 	TArray<FAlgonaSquadCommand> PendingCommands;
 
 	FAlgonaMetricsReportWindow MetricsReportWindow;
+
+	// Рабочие массивы конвейера движения Unit.
+	FAlgonaUnitMovementBuffers UnitMovementBuffers;
+	TArray<FAlgonaSquadMovementFrame> SquadMovementFrames;
 
 	// Состояние стресс-сценария: направление следующего прохода по Y
 	// (+1 или -1) для каждого SquadId.

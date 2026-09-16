@@ -1,12 +1,6 @@
 #include "Core/AlgonaSimulationSubsystem.h"
 
-#include "Army/AlgonaUnitFragments.h"
-
 #include "HAL/PlatformTime.h"
-#include "Mass/EntityFragments.h"
-#include "MassEntityManager.h"
-#include "MassEntitySubsystem.h"
-#include "MassExecutionContext.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
 void UAlgonaSimulationSubsystem::RunSimulationStep(
@@ -31,24 +25,35 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	const double CommandsEndSeconds =
 		FPlatformTime::Seconds();
 
-	// Стадия 2: движение отрядов.
+	// Стадия 2: движение центров Squad.
 	const bool bSquadCentersChanged =
 		UpdateSquadCenters(DeltaTime);
 
 	const double SquadsEndSeconds =
 		FPlatformTime::Seconds();
 
-	// Стадия 3: движение Unit вместе с обновлением Unit Grid.
-	int32 VisitedEntities = 0;
-	const int32 MovedEntities =
-		UpdateUnits(
-			DeltaTime,
-			VisitedEntities);
+	// Стадии 3-5: конвейер движения Unit (AlgonaSimulationMovement.cpp).
+	// Сбор состояния Unit из Mass в плоские массивы.
+	const int32 VisitedEntities =
+		GatherUnitMovementState();
 
-	const double UnitsEndSeconds =
+	const double GatherEndSeconds =
 		FPlatformTime::Seconds();
 
-	if (bSquadCentersChanged || MovedEntities > 0)
+	// L2: желаемая скорость, новая позиция и поворот каждого Unit.
+	SteerUnits(DeltaTime);
+
+	const double SteerEndSeconds =
+		FPlatformTime::Seconds();
+
+	// Запись результата в Mass и Unit Grid.
+	const int32 ChangedEntities =
+		ScatterUnitMovementState();
+
+	const double ScatterEndSeconds =
+		FPlatformTime::Seconds();
+
+	if (bSquadCentersChanged || ChangedEntities > 0)
 	{
 		++StateRevision;
 	}
@@ -57,13 +62,17 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	Metrics.EntityCount = UnitEntities.Num();
 	Metrics.SquadCount = Squads.Num();
 	Metrics.LastVisitedEntities = VisitedEntities;
-	Metrics.LastMovedEntities = MovedEntities;
+	Metrics.LastMovedEntities = ChangedEntities;
 	Metrics.LastCommandsMilliseconds =
 		(CommandsEndSeconds - StepStartSeconds) * 1000.0;
 	Metrics.LastSquadsMilliseconds =
 		(SquadsEndSeconds - CommandsEndSeconds) * 1000.0;
-	Metrics.LastUnitsMilliseconds =
-		(UnitsEndSeconds - SquadsEndSeconds) * 1000.0;
+	Metrics.LastGatherMilliseconds =
+		(GatherEndSeconds - SquadsEndSeconds) * 1000.0;
+	Metrics.LastSteerMilliseconds =
+		(SteerEndSeconds - GatherEndSeconds) * 1000.0;
+	Metrics.LastScatterMilliseconds =
+		(ScatterEndSeconds - SteerEndSeconds) * 1000.0;
 	Metrics.LastStepMilliseconds =
 		(FPlatformTime::Seconds() - StepStartSeconds) * 1000.0;
 
@@ -116,6 +125,7 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 	{
 		if (!Squad.bHasMoveTarget)
 		{
+			Squad.CenterVelocity = FVector::ZeroVector;
 			continue;
 		}
 
@@ -160,6 +170,14 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 			bAnyCenterChanged = true;
 		}
 
+		// Скорость центра за этот тик — упреждение для L2: Unit сразу идут
+		// вместе с Squad, а не догоняют свои слоты.
+		Squad.CenterVelocity = DeltaTime > 0.0f
+			? (Squad.CenterLocation - OldCenterLocation)
+				/ static_cast<double>(DeltaTime)
+			: FVector::ZeroVector;
+		Squad.CenterVelocity.Z = 0.0;
+
 		if (IsSquadSpatialGridEnabled())
 		{
 			SquadSpatialGrid.UpdateSquad(
@@ -170,110 +188,4 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 	}
 
 	return bAnyCenterChanged;
-}
-
-int32 UAlgonaSimulationSubsystem::UpdateUnits(
-	float DeltaTime,
-	int32& OutVisitedEntities)
-{
-	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_UpdateUnitsP1);
-
-	OutVisitedEntities = 0;
-	int32 MovedEntities = 0;
-
-	if (!MassEntitySubsystem
-		|| !UnitUpdateQuery
-		|| DeltaTime <= 0.0f)
-	{
-		return 0;
-	}
-
-	FMassEntityManager& EntityManager =
-		MassEntitySubsystem->GetMutableEntityManager();
-	FMassExecutionContext ExecutionContext =
-		EntityManager.CreateExecutionContext(DeltaTime);
-
-	UnitUpdateQuery->ForEachEntityChunk(
-		ExecutionContext,
-		[
-			this,
-			DeltaTime,
-			&OutVisitedEntities,
-			&MovedEntities
-		](FMassExecutionContext& Context)
-		{
-			TArrayView<FTransformFragment> Transforms =
-				Context.GetMutableFragmentView<FTransformFragment>();
-			const TConstArrayView<FAlgonaUnitIdFragment> Ids =
-				Context.GetFragmentView<FAlgonaUnitIdFragment>();
-			const TConstArrayView<FAlgonaSquadMemberFragment> Members =
-				Context.GetFragmentView<FAlgonaSquadMemberFragment>();
-			TArrayView<FAlgonaUnitMovementFragment> Movement =
-				Context.GetMutableFragmentView<FAlgonaUnitMovementFragment>();
-
-			for (int32 Index = 0;
-				Index < Context.GetNumEntities();
-				++Index)
-			{
-				++OutVisitedEntities;
-
-				FAlgonaUnitMovementFragment& UnitMovement =
-					Movement[Index];
-				UnitMovement.LastProcessedSimulationTick = SimulationTick;
-
-				const int32 SquadId = Members[Index].SquadId;
-				if (!Squads.IsValidIndex(SquadId)
-					|| Squads[SquadId].SquadId != SquadId)
-				{
-					UnitMovement.Velocity = FVector::ZeroVector;
-					UnitMovement.State = EAlgonaUnitMovementState::Idle;
-					continue;
-				}
-
-				const FAlgonaSquad& Squad = Squads[SquadId];
-				FTransform& Transform =
-					Transforms[Index].GetMutableTransform();
-
-				const FVector CurrentLocation = Transform.GetLocation();
-				const FVector DesiredLocation = ComputeSlotWorldPosition(
-					Squad,
-					Members[Index].SlotIndex);
-				const FVector ToDesiredLocation =
-					DesiredLocation - CurrentLocation;
-
-				if (ToDesiredLocation.IsNearlyZero(0.1))
-				{
-					UnitMovement.Velocity = FVector::ZeroVector;
-					UnitMovement.State = EAlgonaUnitMovementState::Idle;
-					continue;
-				}
-
-				const double MaxMoveDistance =
-					static_cast<double>(Squad.UnitMoveSpeed) * DeltaTime;
-				const FVector MoveDelta =
-					ToDesiredLocation.GetClampedToMaxSize(MaxMoveDistance);
-
-				UnitMovement.Velocity = MoveDelta / DeltaTime;
-				UnitMovement.State = EAlgonaUnitMovementState::Moving;
-
-				const FVector NewLocation =
-					CurrentLocation + MoveDelta;
-
-				UnitSpatialGrid.UpdateUnit(
-					Ids[Index].Value,
-					NewLocation);
-
-				Transform.SetLocation(NewLocation);
-
-				if (!UnitMovement.Velocity.IsNearlyZero())
-				{
-					Transform.SetRotation(
-						UnitMovement.Velocity.Rotation().Quaternion());
-				}
-
-				++MovedEntities;
-			}
-		});
-
-	return MovedEntities;
 }

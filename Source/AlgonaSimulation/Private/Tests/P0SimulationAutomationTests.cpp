@@ -56,8 +56,8 @@ bool FAlgonaP0SimulationTypesTest::RunTest(const FString& Parameters)
 		TEXT("Default squad center speed is positive"),
 		DefaultSquad.CenterMoveSpeed > 0.0f);
 	TestTrue(
-		TEXT("Default unit follow speed is positive"),
-		DefaultSquad.UnitMoveSpeed > 0.0f);
+		TEXT("Default unit speed factor lets units catch up with the squad"),
+		DefaultSquad.UnitSpeedFactor > 1.0f);
 
 	const FAlgonaUnitSnapshot DefaultSnapshot;
 	TestEqual(

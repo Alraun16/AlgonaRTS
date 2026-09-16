@@ -73,8 +73,16 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	// Активные Unit по слотам: ActiveUnitIds[SlotIndex] = UnitId.
 	TArray<uint32> ActiveUnitIds;
 
-	// P1 debug movement values. Gameplay data will replace these later.
+	// Скорость центра за последний тик — упреждение для L2; ноль, если Squad стоит.
+	FVector CenterVelocity = FVector::ZeroVector;
+
+	// Заданная скорость Squad, см/с. Отдельные скорости ходьбы и бега
+	// появятся вместе с приказами движения.
 	float CenterMoveSpeed = 300.0f;
-	float UnitMoveSpeed = 450.0f;
+
+	// Максимальная скорость Unit = CenterMoveSpeed * UnitSpeedFactor:
+	// запас скорости на догон строя и перестроение.
+	float UnitSpeedFactor = 1.25f;
+
 	bool bHasMoveTarget = false;
 };

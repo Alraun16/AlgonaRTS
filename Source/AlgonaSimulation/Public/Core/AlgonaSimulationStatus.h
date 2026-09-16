@@ -29,7 +29,11 @@ struct ALGONASIMULATION_API FAlgonaSimulationMetrics
 	// Сумма стадий чуть меньше LastStepMilliseconds: остаток — учёт метрик.
 	double LastCommandsMilliseconds = 0.0;
 	double LastSquadsMilliseconds = 0.0;
-	double LastUnitsMilliseconds = 0.0;
+
+	// Конвейер движения Unit: сбор из Mass, L2, запись в Mass и Unit Grid.
+	double LastGatherMilliseconds = 0.0;
+	double LastSteerMilliseconds = 0.0;
+	double LastScatterMilliseconds = 0.0;
 	double BacklogSeconds = 0.0;
 	uint64 OverloadedFrameCount = 0;
 };

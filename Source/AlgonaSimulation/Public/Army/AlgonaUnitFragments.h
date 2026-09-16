@@ -51,4 +51,8 @@ struct ALGONASIMULATION_API FAlgonaUnitMovementFragment : public FMassFragment
 	FVector Velocity = FVector::ZeroVector;
 	uint64 LastProcessedSimulationTick = 0;
 	EAlgonaUnitMovementState State = EAlgonaUnitMovementState::Idle;
+
+	// Направление взгляда Unit на плоскости (yaw), радианы.
+	// Поворот Transform строится из этого значения.
+	float FacingYawRadians = 0.0f;
 };

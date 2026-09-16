@@ -210,15 +210,20 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 
 			FAlgonaUnitMovementFragment& Movement =
 				EntityView.GetFragmentData<FAlgonaUnitMovementFragment>();
+			// Unit стартует в своём слоте и смотрит по направлению Squad.
+			const FVector SquadForward = Squad.GetForwardDirection2D();
+
 			Movement.Velocity = FVector::ZeroVector;
 			Movement.LastProcessedSimulationTick = 0;
 			Movement.State = EAlgonaUnitMovementState::Idle;
+			Movement.FacingYawRadians = static_cast<float>(
+				FMath::Atan2(SquadForward.Y, SquadForward.X));
 
 			FTransform InitialTransform = FTransform::Identity;
 			InitialTransform.SetLocation(
 				ComputeSlotWorldPosition(Squad, SlotIndex));
 			InitialTransform.SetRotation(
-				Squad.FacingDirection.Rotation().Quaternion());
+				FQuat(FVector::UpVector, Movement.FacingYawRadians));
 
 			FTransformFragment& Transform =
 				EntityView.GetFragmentData<FTransformFragment>();

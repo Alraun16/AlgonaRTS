@@ -484,7 +484,9 @@ void UAlgonaSimulationSubsystem::AccumulateMetricsReportStep()
 		Metrics.LastStepMilliseconds);
 	Window.CommandsMillisecondsSum += Metrics.LastCommandsMilliseconds;
 	Window.SquadsMillisecondsSum += Metrics.LastSquadsMilliseconds;
-	Window.UnitsMillisecondsSum += Metrics.LastUnitsMilliseconds;
+	Window.GatherMillisecondsSum += Metrics.LastGatherMilliseconds;
+	Window.SteerMillisecondsSum += Metrics.LastSteerMilliseconds;
+	Window.ScatterMillisecondsSum += Metrics.LastScatterMilliseconds;
 	Window.MovedEntitiesSum += Metrics.LastMovedEntities;
 }
 
@@ -539,7 +541,7 @@ void UAlgonaSimulationSubsystem::UpdateMetricsReport(
 	UE_LOG(
 		LogAlgonaSimulation,
 		Display,
-		TEXT("[P2 Metrics] units=%d window=%.2fs steps=%d (%.1f Hz) maxSteps/frame=%d | step avg=%.2f max=%.2f ms | commands=%.2f squads=%.2f units=%.2f ms | moved avg=%lld | backlog=%.3fs overloaded+=%llu | stress=%s"),
+		TEXT("[P2 Metrics] units=%d window=%.2fs steps=%d (%.1f Hz) maxSteps/frame=%d | step avg=%.2f max=%.2f ms | commands=%.2f squads=%.2f gather=%.2f steer=%.2f scatter=%.2f ms | changed avg=%lld | backlog=%.3fs overloaded+=%llu | stress=%s"),
 		UnitEntities.Num(),
 		WindowSeconds,
 		Window.StepCount,
@@ -549,7 +551,9 @@ void UAlgonaSimulationSubsystem::UpdateMetricsReport(
 		Window.StepMillisecondsMax,
 		Window.CommandsMillisecondsSum * InverseStepCount,
 		Window.SquadsMillisecondsSum * InverseStepCount,
-		Window.UnitsMillisecondsSum * InverseStepCount,
+		Window.GatherMillisecondsSum * InverseStepCount,
+		Window.SteerMillisecondsSum * InverseStepCount,
+		Window.ScatterMillisecondsSum * InverseStepCount,
 		static_cast<long long>(
 			static_cast<double>(Window.MovedEntitiesSum) * InverseStepCount),
 		FixedStepAccumulator.GetBacklogSeconds(),
