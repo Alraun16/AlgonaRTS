@@ -139,6 +139,23 @@ bool FAlgonaUnitSpatialGrid::UpdateUnit(
 	return true;
 }
 
+bool FAlgonaUnitSpatialGrid::NeedsCellUpdate(
+	uint32 UnitId,
+	const FVector& WorldPosition) const
+{
+	if (UnitId == 0
+		|| !UnitEntries.IsValidIndex(
+			static_cast<int32>(UnitId)))
+	{
+		return false;
+	}
+
+	const FUnitEntry& Entry = UnitEntries[UnitId];
+
+	return Entry.IndexInCell != INDEX_NONE
+		&& GetCellCoordinates(WorldPosition) != Entry.Cell;
+}
+
 void FAlgonaUnitSpatialGrid::QueryUnitIds(
 	const FVector2D& WorldMin,
 	const FVector2D& WorldMax,

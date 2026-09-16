@@ -33,6 +33,15 @@ public:
 		uint32 UnitId,
 		const FVector& WorldPosition);
 
+	/**
+	 * Проверяет, не изменяя сетку, окажется ли Unit в другой ячейке.
+	 * Безопасен для одновременного вызова из нескольких потоков, пока
+	 * сетку никто не изменяет.
+	 */
+	bool NeedsCellUpdate(
+		uint32 UnitId,
+		const FVector& WorldPosition) const;
+
 	void QueryUnitIds(
 		const FVector2D& WorldMin,
 		const FVector2D& WorldMax,

@@ -43,6 +43,24 @@ bool FAlgonaP2UnitSpatialGridTest::RunTest(
 		UnitIds.Num(),
 		2);
 
+	TestFalse(
+		TEXT("Move inside the same cell needs no grid update"),
+		Grid.NeedsCellUpdate(
+			1,
+			FVector(900.0, 900.0, 0.0)));
+
+	TestTrue(
+		TEXT("Move into another cell needs a grid update"),
+		Grid.NeedsCellUpdate(
+			1,
+			FVector(20100.0, 100.0, 0.0)));
+
+	TestFalse(
+		TEXT("Unknown unit needs no grid update"),
+		Grid.NeedsCellUpdate(
+			99,
+			FVector(20100.0, 100.0, 0.0)));
+
 	TestTrue(
 		TEXT("Unit 1 crossed into another cell"),
 		Grid.UpdateUnit(

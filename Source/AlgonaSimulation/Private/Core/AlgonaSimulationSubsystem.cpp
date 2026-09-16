@@ -4,6 +4,7 @@
 
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "HAL/PlatformTime.h"
 #include "Mass/EntityFragments.h"
 #include "MassEntityManager.h"
@@ -541,7 +542,7 @@ void UAlgonaSimulationSubsystem::UpdateMetricsReport(
 	UE_LOG(
 		LogAlgonaSimulation,
 		Display,
-		TEXT("[P2 Metrics] units=%d window=%.2fs steps=%d (%.1f Hz) maxSteps/frame=%d | step avg=%.2f max=%.2f ms | commands=%.2f squads=%.2f gather=%.2f steer=%.2f scatter=%.2f ms | changed avg=%lld | backlog=%.3fs overloaded+=%llu | stress=%s"),
+		TEXT("[P2 Metrics] units=%d window=%.2fs steps=%d (%.1f Hz) maxSteps/frame=%d | step avg=%.2f max=%.2f ms | commands=%.2f squads=%.2f gather=%.2f steer=%.2f scatter=%.2f ms | changed avg=%lld | backlog=%.3fs overloaded+=%llu | parallel=%s workers=%d | stress=%s"),
 		UnitEntities.Num(),
 		WindowSeconds,
 		Window.StepCount,
@@ -560,6 +561,8 @@ void UAlgonaSimulationSubsystem::UpdateMetricsReport(
 		static_cast<unsigned long long>(
 			FixedStepAccumulator.GetOverloadedFrameCount()
 				- Window.StartOverloadedFrameCount),
+		Metrics.bLastParallelMovement ? TEXT("ON") : TEXT("OFF"),
+		FTaskGraphInterface::Get().GetNumWorkerThreads(),
 		bStressMoveEnabled ? TEXT("ON") : TEXT("OFF"));
 
 	StartWindow();
@@ -582,6 +585,10 @@ void UAlgonaSimulationSubsystem::InitializeQueries()
 		EMassFragmentAccess::ReadWrite);
 	UnitUpdateQuery->AddTagRequirement<FAlgonaUnitTag>(
 		EMassFragmentPresence::All);
+
+	// Конвейер движения не отправляет отложенные команды Mass, поэтому
+	// параллельным задачам не нужны собственные буферы команд.
+	UnitUpdateQuery->SetParallelCommandBufferEnabled(false);
 
 	UnitSnapshotQuery =
 		MakeUnique<FMassEntityQuery>(EntityManager.AsShared());

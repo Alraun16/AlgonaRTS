@@ -232,6 +232,10 @@ private:
 
 		// 1 — позиция или поворот изменились, Transform нужно записать.
 		TArray<uint8> ChangedFlags;
+
+		// 1 — Unit перешёл в другую ячейку Unit Grid. Сетка обновляется
+		// последовательно после параллельной записи.
+		TArray<uint8> CellChangedFlags;
 	};
 
 	// Данные Squad, общие для всех его Unit в текущем тике.
@@ -269,11 +273,13 @@ private:
 	bool UpdateSquadCenters(float DeltaTime);
 
 	// Конвейер движения Unit (AlgonaSimulationMovement.cpp).
+	// bParallel — выполнять стадию на рабочих потоках; результат одинаков.
+	bool IsParallelMovementEnabled() const;
 	// Возвращает число собранных Unit.
-	int32 GatherUnitMovementState();
-	void SteerUnits(float DeltaTime);
+	int32 GatherUnitMovementState(bool bParallel);
+	void SteerUnits(float DeltaTime, bool bParallel);
 	// Возвращает число Unit, у которых изменились позиция или поворот.
-	int32 ScatterUnitMovementState();
+	int32 ScatterUnitMovementState(bool bParallel);
 
 	FVector ComputeSlotWorldPosition(
 		const FAlgonaSquad& Squad,

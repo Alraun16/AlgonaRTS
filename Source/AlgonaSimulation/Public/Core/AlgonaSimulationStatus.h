@@ -34,6 +34,9 @@ struct ALGONASIMULATION_API FAlgonaSimulationMetrics
 	double LastGatherMilliseconds = 0.0;
 	double LastSteerMilliseconds = 0.0;
 	double LastScatterMilliseconds = 0.0;
+
+	// Конвейер движения последнего шага выполнялся на рабочих потоках.
+	bool bLastParallelMovement = false;
 	double BacklogSeconds = 0.0;
 	uint64 OverloadedFrameCount = 0;
 };

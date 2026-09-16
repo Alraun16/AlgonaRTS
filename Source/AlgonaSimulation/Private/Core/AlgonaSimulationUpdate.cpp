@@ -33,22 +33,25 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 		FPlatformTime::Seconds();
 
 	// Стадии 3-5: конвейер движения Unit (AlgonaSimulationMovement.cpp).
+	// Режим читается один раз, чтобы все стадии шага шли в одном режиме.
+	const bool bParallelMovement = IsParallelMovementEnabled();
+
 	// Сбор состояния Unit из Mass в плоские массивы.
 	const int32 VisitedEntities =
-		GatherUnitMovementState();
+		GatherUnitMovementState(bParallelMovement);
 
 	const double GatherEndSeconds =
 		FPlatformTime::Seconds();
 
 	// L2: желаемая скорость, новая позиция и поворот каждого Unit.
-	SteerUnits(DeltaTime);
+	SteerUnits(DeltaTime, bParallelMovement);
 
 	const double SteerEndSeconds =
 		FPlatformTime::Seconds();
 
 	// Запись результата в Mass и Unit Grid.
 	const int32 ChangedEntities =
-		ScatterUnitMovementState();
+		ScatterUnitMovementState(bParallelMovement);
 
 	const double ScatterEndSeconds =
 		FPlatformTime::Seconds();
@@ -73,6 +76,7 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 		(SteerEndSeconds - GatherEndSeconds) * 1000.0;
 	Metrics.LastScatterMilliseconds =
 		(ScatterEndSeconds - SteerEndSeconds) * 1000.0;
+	Metrics.bLastParallelMovement = bParallelMovement;
 	Metrics.LastStepMilliseconds =
 		(FPlatformTime::Seconds() - StepStartSeconds) * 1000.0;
 
