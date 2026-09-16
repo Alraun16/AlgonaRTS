@@ -116,6 +116,39 @@ public:
 		return Squads.Num();
 	}
 
+	// Чтение состояния для локального интерфейса игрока (выбор, подсветка).
+	// Только чтение: изменения идут через очередь команд.
+
+	/** Squad по SquadId или nullptr. */
+	const FAlgonaSquad* FindSquad(int32 SquadId) const
+	{
+		return Squads.IsValidIndex(SquadId) && Squads[SquadId].SquadId == SquadId
+			? &Squads[SquadId]
+			: nullptr;
+	}
+
+	/** Позиция Unit из состояния Simulation. */
+	bool GetUnitPosition(uint32 UnitId, FVector& OutPosition) const
+	{
+		const int32 UnitIndex = static_cast<int32>(UnitId) - 1;
+		if (UnitId == 0 || !UnitState.Positions.IsValidIndex(UnitIndex))
+		{
+			return false;
+		}
+
+		OutPosition = UnitState.Positions[UnitIndex];
+		return true;
+	}
+
+	/** SquadId Unit или INDEX_NONE. */
+	int32 GetUnitSquadId(uint32 UnitId) const
+	{
+		const int32 UnitIndex = static_cast<int32>(UnitId) - 1;
+		return UnitId != 0 && UnitState.SquadIds.IsValidIndex(UnitIndex)
+			? UnitState.SquadIds[UnitIndex]
+			: INDEX_NONE;
+	}
+
 	double GetUnitSpatialGridCellSizeCm() const
 	{
 		return UnitSpatialGrid.GetCellSizeCm();

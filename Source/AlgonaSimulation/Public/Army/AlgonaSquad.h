@@ -73,6 +73,10 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	// Активные Unit по слотам: ActiveUnitIds[SlotIndex] = UnitId.
 	TArray<uint32> ActiveUnitIds;
 
+	// Радиус Unit («размер» Unit), см: круги выбора, позже — локальное избегание L3.
+	// Пока один на Squad; у разных типов существ (лучник, тролль) будет свой.
+	float UnitRadius = 35.0f;
+
 	// Скорость центра за последний тик — упреждение для L2; ноль, если Squad стоит.
 	FVector CenterVelocity = FVector::ZeroVector;
 
