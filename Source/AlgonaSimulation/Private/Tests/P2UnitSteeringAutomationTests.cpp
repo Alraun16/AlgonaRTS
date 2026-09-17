@@ -80,9 +80,13 @@ bool FAlgonaP2SteeringYawTest::RunTest(
 	const float MaxStep =
 		FMath::DegreesToRadians(MaxTurnRateDegrees) * SteeringTestDeltaTime;
 
-	// Большой поворот ограничен шагом: 540 градусов/с * 0.025 с = 13.5 градуса.
+	// Большой поворот ограничен шагом: MaxTurnRateDegrees * длительность тика.
 	float Yaw = StepYawTowards(0.0f, static_cast<float>(UE_HALF_PI), MaxStep);
-	TestEqual(TEXT("Turn is limited per tick"), FMath::RadiansToDegrees(Yaw), 13.5f, SteeringTestTolerance);
+	TestEqual(
+		TEXT("Turn is limited per tick"),
+		FMath::RadiansToDegrees(Yaw),
+		MaxTurnRateDegrees * SteeringTestDeltaTime,
+		SteeringTestTolerance);
 
 	// Малый поворот выполняется сразу.
 	Yaw = StepYawTowards(0.0f, 0.1f, MaxStep);

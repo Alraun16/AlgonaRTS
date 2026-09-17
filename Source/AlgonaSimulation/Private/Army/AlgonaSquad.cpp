@@ -6,6 +6,18 @@ FVector FAlgonaSquad::GetForwardDirection2D() const
 	return Forward.IsNearlyZero() ? FVector::ForwardVector : Forward;
 }
 
+float FAlgonaSquad::GetMaxYawRate() const
+{
+	// Угловая скорость = линейная скорость крайнего слота / его радиус.
+	// Squad из одного Unit (радиус около нуля) поворачивается как Unit
+	// на расстоянии одного интервала строя.
+	const float Radius = FMath::Max(
+		FormationLayout.Radius,
+		FormationParams.SlotSpacing);
+
+	return TurnSpeedFactor * CenterMoveSpeed / Radius;
+}
+
 bool FAlgonaSquad::RemoveActiveUnitAt(
 	int32 SlotIndex,
 	uint32& OutMovedUnitId)

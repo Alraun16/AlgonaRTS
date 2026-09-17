@@ -145,3 +145,80 @@ void BuildAlgonaFormationLayout(
 	// Передняя строка до сдвига стояла на X = 0.
 	OutLayout.FrontRowLocalX = -Center.X;
 }
+
+void MirrorAlgonaFormationLayout(
+	FAlgonaFormationLayout& Layout,
+	TArray<int32>& OutNewSlotForOldSlot)
+{
+	const int32 SlotCount = Layout.Slots.Num();
+	OutNewSlotForOldSlot.Reset(SlotCount);
+
+	if (SlotCount == 0)
+	{
+		return;
+	}
+
+	// 1. Отражение: смещения меняют знак, строки меняются местами.
+	// Прямоугольник границ симметричен относительно центра, поэтому
+	// центр Squad остаётся тем же, а положения слотов в мире не меняются.
+	TArray<FAlgonaFormationSlot> MirroredSlots = Layout.Slots;
+
+	for (FAlgonaFormationSlot& Slot : MirroredSlots)
+	{
+		Slot.LocalOffset = -Slot.LocalOffset;
+		Slot.RowIndex = Layout.RowCount - 1 - Slot.RowIndex;
+	}
+
+	// 2. Обычный порядок слотов: строки спереди назад, внутри строки
+	// от центра к краям, правая сторона первой.
+	TArray<int32> Order;
+	Order.Reserve(SlotCount);
+
+	for (int32 SlotIndex = 0; SlotIndex < SlotCount; ++SlotIndex)
+	{
+		Order.Add(SlotIndex);
+	}
+
+	Order.Sort([&MirroredSlots](int32 A, int32 B)
+	{
+		const FAlgonaFormationSlot& SlotA = MirroredSlots[A];
+		const FAlgonaFormationSlot& SlotB = MirroredSlots[B];
+
+		if (SlotA.RowIndex != SlotB.RowIndex)
+		{
+			return SlotA.RowIndex < SlotB.RowIndex;
+		}
+
+		const float DistanceA = FMath::Abs(SlotA.LocalOffset.Y);
+		const float DistanceB = FMath::Abs(SlotB.LocalOffset.Y);
+
+		if (DistanceA != DistanceB)
+		{
+			return DistanceA < DistanceB;
+		}
+
+		return SlotA.LocalOffset.Y > SlotB.LocalOffset.Y;
+	});
+
+	// 3. Перенумерация. Вызывающий код переставляет ActiveUnitIds и SlotIndex
+	// по OutNewSlotForOldSlot — Unit при этом не двигаются.
+	OutNewSlotForOldSlot.SetNum(SlotCount);
+	TArray<FAlgonaFormationSlot> OrderedSlots;
+	OrderedSlots.Reserve(SlotCount);
+
+	float FrontRowLocalX = MirroredSlots[0].LocalOffset.X;
+
+	for (int32 NewSlotIndex = 0; NewSlotIndex < SlotCount; ++NewSlotIndex)
+	{
+		const int32 OldSlotIndex = Order[NewSlotIndex];
+		OutNewSlotForOldSlot[OldSlotIndex] = NewSlotIndex;
+		OrderedSlots.Add(MirroredSlots[OldSlotIndex]);
+
+		FrontRowLocalX = FMath::Max(
+			FrontRowLocalX,
+			MirroredSlots[OldSlotIndex].LocalOffset.X);
+	}
+
+	Layout.Slots = MoveTemp(OrderedSlots);
+	Layout.FrontRowLocalX = FrontRowLocalX;
+}

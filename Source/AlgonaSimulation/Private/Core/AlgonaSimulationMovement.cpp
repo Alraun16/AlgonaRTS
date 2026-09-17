@@ -82,8 +82,12 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 		Frame.CenterVelocity = FVector2f(
 			static_cast<float>(Squad.CenterVelocity.X),
 			static_cast<float>(Squad.CenterVelocity.Y));
+		Frame.YawRate = Squad.YawRate;
 		Frame.UnitMaxSpeed =
-			Squad.CenterMoveSpeed * Squad.UnitSpeedFactor;
+			Squad.CenterMoveSpeed
+			* (Squad.YawRate != 0.0f
+				? Squad.TurningUnitSpeedFactor
+				: Squad.UnitSpeedFactor);
 	}
 
 	FAlgonaUnitStateArrays& State = UnitState;
@@ -131,18 +135,28 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 
 			FVector& Position = State.Positions[UnitIndex];
 
-			// L2: желаемая скорость. Центр Squad в этом тике уже сдвинут,
+			// Скорость слота = скорость центра + вклад поворота строя.
+			// При повороте на YawRate вектор «вперёд» движется вдоль «вправо»,
+			// а «вправо» — против «вперёд», поэтому вклад поворота равен
+			// YawRate * (X * Right - Y * Forward). Дальние слоты быстрее.
+			const FVector2f SlotVelocity(
+				Frame.CenterVelocity.X + Frame.YawRate * static_cast<float>(
+					LocalOffset.X * Frame.Right.X - LocalOffset.Y * Frame.Forward.X),
+				Frame.CenterVelocity.Y + Frame.YawRate * static_cast<float>(
+					LocalOffset.X * Frame.Right.Y - LocalOffset.Y * Frame.Forward.Y));
+
+			// L2: желаемая скорость. Squad в этом тике уже сдвинут и повёрнут,
 			// поэтому отставание считается от положения слота в начале тика.
 			const FVector2f ToSlotAtTickStart(
 				static_cast<float>(SlotPosition.X - Position.X)
-					- Frame.CenterVelocity.X * DeltaTime,
+					- SlotVelocity.X * DeltaTime,
 				static_cast<float>(SlotPosition.Y - Position.Y)
-					- Frame.CenterVelocity.Y * DeltaTime);
+					- SlotVelocity.Y * DeltaTime);
 
 			const FVector2f DesiredVelocity =
 				AlgonaUnitSteering::ComputeDesiredVelocity(
 					ToSlotAtTickStart,
-					Frame.CenterVelocity,
+					SlotVelocity,
 					Frame.UnitMaxSpeed,
 					DeltaTime);
 

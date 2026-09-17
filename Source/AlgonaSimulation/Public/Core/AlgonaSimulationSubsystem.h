@@ -298,6 +298,7 @@ private:
 		FVector Forward = FVector::ForwardVector;
 		FVector Right = FVector::RightVector;
 		FVector2f CenterVelocity = FVector2f::ZeroVector;
+		float YawRate = 0.0f;
 		float FacingYaw = 0.0f;
 		float UnitMaxSpeed = 0.0f;
 	};
@@ -337,6 +338,13 @@ private:
 		const FVector& FinalDirection,
 		int32 RowLength);
 	void ApplyMoveGroupCommand(const FAlgonaSquadCommand& Command);
+
+	// Разворот больше 90°: Unit переходят в зеркальные слоты, направление
+	// Squad меняется на противоположное. false — если таблица неприменима.
+	bool ApplyMirrorTurn(FAlgonaSquad& Squad);
+
+	// Значение CVar algona.P2.SquadMoveSpeed; 0 — подмены нет.
+	static float GetSquadMoveSpeedOverride();
 	bool UpdateSquadCenters(float DeltaTime);
 
 	// Движение Unit (AlgonaSimulationMovement.cpp).

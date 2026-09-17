@@ -18,7 +18,7 @@ namespace AlgonaUnitSteering
 	inline constexpr float FaceMovementMinDistance = 100.0f;
 
 	// Максимальная скорость поворота Unit, градусов в секунду.
-	inline constexpr float MaxTurnRateDegrees = 540.0f;
+	inline constexpr float MaxTurnRateDegrees = 360.0f;
 
 	// Ниже этой скорости Unit считается стоящим, см/с.
 	inline constexpr float IdleSpeed = 1.0f;

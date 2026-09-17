@@ -18,6 +18,12 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	/** Направление «вперёд» на плоскости; ForwardVector, если оно не задано. */
 	FVector GetForwardDirection2D() const;
 
+	/**
+	 * Максимальная скорость поворота строя, рад/с: крайний слот на дуге
+	 * движется не быстрее TurnSpeedFactor * CenterMoveSpeed.
+	 */
+	float GetMaxYawRate() const;
+
 	// Операции над составом меняют только массивы Squad. Вызывающий код
 	// обязан обновить SlotIndex во фрагменте Unit, чей слот изменился,
 	// и затем вызвать ReformAfterCompositionChange.
@@ -81,22 +87,60 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	FVector CenterVelocity = FVector::ZeroVector;
 
 	// Заданная скорость Squad, см/с. Отдельные скорости ходьбы и бега
-	// появятся вместе с приказами движения.
-	float CenterMoveSpeed = 300.0f;
+	// появятся вместе с приказами движения. Для подбора скорости в редакторе
+	// есть CVar algona.P2.SquadMoveSpeed.
+	float CenterMoveSpeed = 450.0f;
 
 	// Максимальная скорость Unit = CenterMoveSpeed * UnitSpeedFactor:
 	// запас скорости на догон строя и перестроение.
-	float UnitSpeedFactor = 1.25f;
+	float UnitSpeedFactor = 1.3f;
+
+	// То же, пока строй поворачивается. На ходу крайний слот при повороте
+	// движется быстрее Squad (скорость центра + скорость от вращения),
+	// поэтому Unit нужен больший запас.
+	float TurningUnitSpeedFactor = 1.5f;
 
 	bool bHasMoveTarget = false;
 
-	// Конечное направление текущего приказа движения: Squad принимает его
-	// по прибытии. Движение его не перезаписывает.
+	// Конечное направление текущего приказа. Движение его не перезаписывает.
 	FVector FinalFacingDirection = FVector::ForwardVector;
+
+	// Приказ ещё требует поворота к FinalFacingDirection (в том числе после
+	// прибытия центра).
+	bool bHasFacingTarget = false;
+
+	// Режим марша (длинный путь): Squad поворачивается по ходу движения и
+	// поворачивается к конечному направлению только на подходе к цели.
+	// На коротком пути Squad сразу поворачивается к конечному направлению
+	// и идёт боком или спиной.
+	bool bMarching = false;
+
+	// Марш: поворот к конечному направлению на подходе уже начат.
+	bool bFinalTurnStarted = false;
+
+	// Плавный старт после зеркального разворота, с: пока Unit разворачиваются
+	// на месте, скорость движения и поворота Squad растёт от нуля до полной.
+	float MirrorTurnStartRemainingSeconds = 0.0f;
+
+	// Скорость поворота строя за последний тик, рад/с (знак — направление) —
+	// упреждение для L2, как CenterVelocity.
+	float YawRate = 0.0f;
+
+	// Скорость крайнего слота при повороте относительно заданной скорости
+	// Squad. Меньше UnitSpeedFactor, чтобы у крайних Unit был запас на догон.
+	float TurnSpeedFactor = 1.0f;
 
 	// Длина строки из составного приказа «движение + ширина»; 0 — нет.
 	// Применяется за RowLengthApplyDistanceCm до цели (или сразу, если ближе).
 	int32 PendingRowLength = 0;
 
 	static constexpr double RowLengthApplyDistanceCm = 1000.0;
+
+	// Путь считается маршем, если он длиннее обоих порогов:
+	// MarchMinDistanceCm и MarchMinRadiusFactor радиусов раскладки.
+	static constexpr double MarchMinDistanceCm = 2000.0;
+	static constexpr double MarchMinRadiusFactor = 2.0;
+
+	// Длительность плавного старта после зеркального разворота, с.
+	static constexpr float MirrorTurnStartSeconds = 0.5f;
 };

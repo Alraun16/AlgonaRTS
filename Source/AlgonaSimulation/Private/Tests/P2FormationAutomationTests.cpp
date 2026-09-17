@@ -175,4 +175,92 @@ bool FAlgonaP2FormationPartialRowTest::RunTest(
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAlgonaP2FormationMirrorLayoutTest,
+	"Algona.P2.Formation.MirrorLayout",
+	EAutomationTestFlags_ApplicationContextMask
+		| EAutomationTestFlags::SmokeFilter);
+
+bool FAlgonaP2FormationMirrorLayoutTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+
+	FAlgonaFormationParams Params;
+	Params.RowLength = 10;
+
+	// Неполная последняя строка — случай, ради которого раскладка
+	// отражается целиком: ни один Unit не должен менять место.
+	FAlgonaFormationLayout Layout;
+	BuildAlgonaFormationLayout(Params, 23, Layout);
+
+	const FAlgonaFormationLayout OriginalLayout = Layout;
+
+	TArray<int32> NewSlotForOldSlot;
+	MirrorAlgonaFormationLayout(Layout, NewSlotForOldSlot);
+
+	TestEqual(TEXT("Slot count"), Layout.Slots.Num(), OriginalLayout.Slots.Num());
+	TestEqual(TEXT("Mapping size"), NewSlotForOldSlot.Num(), OriginalLayout.Slots.Num());
+
+	TArray<int32> UseCount;
+	UseCount.Init(0, Layout.Slots.Num());
+
+	for (int32 OldSlotIndex = 0; OldSlotIndex < NewSlotForOldSlot.Num(); ++OldSlotIndex)
+	{
+		const int32 NewSlotIndex = NewSlotForOldSlot[OldSlotIndex];
+
+		if (!TestTrue(TEXT("New slot is valid"), UseCount.IsValidIndex(NewSlotIndex)))
+		{
+			return false;
+		}
+
+		++UseCount[NewSlotIndex];
+
+		// Слот того же Unit стоит там же в мире: смещение сменило знак,
+		// а направление Squad — противоположное.
+		TestTrue(
+			TEXT("Slot keeps its world position"),
+			Layout.Slots[NewSlotIndex].LocalOffset.Equals(
+				-OriginalLayout.Slots[OldSlotIndex].LocalOffset,
+				FormationTestTolerance));
+	}
+
+	for (const int32 Count : UseCount)
+	{
+		TestEqual(TEXT("Each slot used once"), Count, 1);
+	}
+
+	// Обычный порядок слотов сохранён: строки спереди назад, внутри строки
+	// от центра к краям.
+	for (int32 SlotIndex = 1; SlotIndex < Layout.Slots.Num(); ++SlotIndex)
+	{
+		const FAlgonaFormationSlot& Previous = Layout.Slots[SlotIndex - 1];
+		const FAlgonaFormationSlot& Current = Layout.Slots[SlotIndex];
+
+		TestTrue(TEXT("Rows go front to back"), Previous.RowIndex <= Current.RowIndex);
+
+		if (Previous.RowIndex == Current.RowIndex)
+		{
+			TestTrue(
+				TEXT("Slots go from the row center outwards"),
+				FMath::Abs(Previous.LocalOffset.Y) <= FMath::Abs(Current.LocalOffset.Y));
+		}
+	}
+
+	// Границы раскладки симметричны, поэтому передняя строка стоит на том же
+	// расстоянии от центра — но теперь это бывшая задняя, неполная строка.
+	TestEqual(
+		TEXT("Front row distance from the center"),
+		Layout.FrontRowLocalX,
+		OriginalLayout.FrontRowLocalX,
+		FormationTestTolerance);
+
+	TestTrue(
+		TEXT("Front row is the incomplete one"),
+		Layout.Slots[0].RowIndex == 0 && Layout.Slots.Num() % Params.RowLength != 0);
+
+	TestLayoutIsCentered(*this, Layout);
+	return true;
+}
+
 #endif

@@ -29,6 +29,14 @@ namespace
 		TEXT("Requested number of units in one P0/P1 squad."),
 		ECVF_Default);
 
+	// Подбор скорости Squad прямо в запущенной игре: значение больше нуля
+	// заменяет скорость всех Squad. 0 — скорость Squad не трогается.
+	TAutoConsoleVariable<float> CVarAlgonaP2SquadMoveSpeed(
+		TEXT("algona.P2.SquadMoveSpeed"),
+		0.0f,
+		TEXT("Overrides the move speed of every squad in cm/s. 0 keeps each squad own speed."),
+		ECVF_Default);
+
 	// Период отчёта метрик в лог по реальному времени, а не по числу шагов:
 	// при сильной перегрузке отчёт всё равно приходит. 0 — выключено.
 	TAutoConsoleVariable<float> CVarAlgonaP2MetricsReportSeconds(
@@ -554,4 +562,9 @@ bool UAlgonaSimulationSubsystem::IsAuthoritativeSimulationWorld() const
 {
 	const UWorld* World = GetWorld();
 	return World && World->GetNetMode() != NM_Client;
+}
+
+float UAlgonaSimulationSubsystem::GetSquadMoveSpeedOverride()
+{
+	return CVarAlgonaP2SquadMoveSpeed.GetValueOnGameThread();
 }

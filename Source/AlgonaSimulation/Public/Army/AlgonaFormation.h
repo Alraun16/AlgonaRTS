@@ -84,6 +84,18 @@ ALGONASIMULATION_API void BuildAlgonaFormationLayout(
 	FAlgonaFormationLayout& OutLayout);
 
 /**
+ * Отражает раскладку для разворота Squad на 180°: у всех слотов меняется
+ * знак смещения, поэтому их положения в мире не меняются и Unit остаются
+ * на местах. Номера слотов приводятся к обычному порядку (строки спереди
+ * назад, внутри строки от центра к краям, правая сторона первой);
+ * OutNewSlotForOldSlot[СтарыйСлот] — новый номер того же слота.
+ * Неполная строка после отражения оказывается передней.
+ */
+ALGONASIMULATION_API void MirrorAlgonaFormationLayout(
+	FAlgonaFormationLayout& Layout,
+	TArray<int32>& OutNewSlotForOldSlot);
+
+/**
  * Точка слота в мире по центру и направлению «вперёд» (на плоскости).
  * Та же формула, что в конвейере движения: X — вперёд, Y — вправо.
  */

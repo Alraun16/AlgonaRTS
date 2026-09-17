@@ -3,6 +3,32 @@
 #include "HAL/PlatformTime.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
+namespace
+{
+	// Поворот больше этого угла выполняется через зеркальные слоты.
+	// Небольшой запас сверх 90°, чтобы при ровно 90° не было разворота.
+	constexpr double MirrorTurnMinAngleRadians = UE_DOUBLE_HALF_PI + 1.0e-3;
+
+	// Направления совпадают, если угол между ними меньше, рад.
+	constexpr double TurnToleranceRadians = 1.0e-4;
+
+	// Угол поворота от From к To на плоскости со знаком, рад, в [-pi, pi].
+	double GetSignedYawDelta(const FVector& From, const FVector& To)
+	{
+		return FMath::FindDeltaAngleRadians(
+			FMath::Atan2(From.Y, From.X),
+			FMath::Atan2(To.Y, To.X));
+	}
+
+	// Время поворота определяется углом после возможного зеркального
+	// разворота: угол больше 90° превращается в 180° минус угол.
+	double GetEffectiveTurnAngle(const FVector& From, const FVector& To)
+	{
+		const double Angle = FMath::Abs(GetSignedYawDelta(From, To));
+		return Angle > MirrorTurnMinAngleRadians ? UE_DOUBLE_PI - Angle : Angle;
+	}
+}
+
 void UAlgonaSimulationSubsystem::RunSimulationStep(
 	float DeltaTime)
 {
@@ -143,6 +169,16 @@ void UAlgonaSimulationSubsystem::ApplyMoveCommand(
 		: Direction;
 
 	Squad.PendingRowLength = FMath::Max(RowLength, 0);
+	Squad.bHasFacingTarget = true;
+	Squad.bFinalTurnStarted = false;
+
+	// Режим марша решается один раз при получении приказа.
+	const double PathLength =
+		FVector::Dist2D(Squad.CenterLocation, Squad.TargetCenterLocation);
+	Squad.bMarching = PathLength > FMath::Max(
+		FAlgonaSquad::MarchMinDistanceCm,
+		FAlgonaSquad::MarchMinRadiusFactor
+			* static_cast<double>(Squad.FormationLayout.Radius));
 }
 
 void UAlgonaSimulationSubsystem::ApplyMoveGroupCommand(
@@ -285,81 +321,204 @@ void UAlgonaSimulationSubsystem::ApplyMoveGroupCommand(
 	}
 }
 
+bool UAlgonaSimulationSubsystem::ApplyMirrorTurn(FAlgonaSquad& Squad)
+{
+	const int32 SlotCount = Squad.ActiveUnitIds.Num();
+	if (SlotCount != Squad.FormationLayout.Slots.Num() || SlotCount == 0)
+	{
+		return false;
+	}
+
+	// Разворот на 180°: отражается сама раскладка, а не назначение Unit.
+	// Положения слотов в мире не меняются, поэтому Unit остаются на местах
+	// и только разворачиваются. Меняются лишь номера слотов, и неполная
+	// строка оказывается передней — до следующего Reform.
+	TArray<int32> NewSlotForOldSlot;
+	MirrorAlgonaFormationLayout(Squad.FormationLayout, NewSlotForOldSlot);
+
+	TArray<uint32> ReorderedUnitIds;
+	ReorderedUnitIds.SetNumUninitialized(SlotCount);
+
+	for (int32 OldSlotIndex = 0; OldSlotIndex < SlotCount; ++OldSlotIndex)
+	{
+		const int32 NewSlotIndex = NewSlotForOldSlot[OldSlotIndex];
+		const uint32 UnitId = Squad.ActiveUnitIds[OldSlotIndex];
+
+		ReorderedUnitIds[NewSlotIndex] = UnitId;
+		UnitState.SlotIndices[static_cast<int32>(UnitId) - 1] = NewSlotIndex;
+	}
+
+	Squad.ActiveUnitIds = MoveTemp(ReorderedUnitIds);
+	Squad.FacingDirection = -Squad.GetForwardDirection2D();
+	++Squad.FormationRevision;
+	return true;
+}
+
 bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 	float DeltaTime)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_UpdateSquads);
 
-	bool bAnyCenterChanged = false;
+	bool bAnySquadChanged = false;
+
+	// Отладочная подмена скорости всех Squad: удобно подбирать скорость,
+	// не пересобирая проект.
+	const float SquadMoveSpeedOverride = GetSquadMoveSpeedOverride();
 
 	for (FAlgonaSquad& Squad : Squads)
 	{
-		if (!Squad.bHasMoveTarget)
+		if (SquadMoveSpeedOverride > 0.0f)
+		{
+			Squad.CenterMoveSpeed = SquadMoveSpeedOverride;
+		}
+
+		if ((!Squad.bHasMoveTarget && !Squad.bHasFacingTarget)
+			|| DeltaTime <= 0.0f)
 		{
 			Squad.CenterVelocity = FVector::ZeroVector;
+			Squad.YawRate = 0.0f;
 			continue;
+		}
+
+		// Плавный старт после зеркального разворота: пока Unit разворачиваются
+		// на месте, скорость Squad растёт от нуля до полной. Отдельная
+		// инерция движения и поворота появится на шаге 10.
+		double StartSpeedScale = 1.0;
+
+		if (Squad.MirrorTurnStartRemainingSeconds > 0.0f)
+		{
+			Squad.MirrorTurnStartRemainingSeconds =
+				FMath::Max(Squad.MirrorTurnStartRemainingSeconds - DeltaTime, 0.0f);
+
+			StartSpeedScale = 1.0 - static_cast<double>(
+				Squad.MirrorTurnStartRemainingSeconds
+					/ FAlgonaSquad::MirrorTurnStartSeconds);
 		}
 
 		const FVector OldCenterLocation = Squad.CenterLocation;
 
-		FVector ToTarget =
-			Squad.TargetCenterLocation - Squad.CenterLocation;
+		FVector ToTarget = Squad.bHasMoveTarget
+			? Squad.TargetCenterLocation - Squad.CenterLocation
+			: FVector::ZeroVector;
 		ToTarget.Z = 0.0;
 
 		const double DistanceToTarget = ToTarget.Length();
 
 		// Составной приказ: ширина строя применяется за 10 м до цели
 		// (или сразу, если путь короче). Reform сохраняет центр.
-		if (Squad.PendingRowLength > 0
+		if (Squad.bHasMoveTarget
+			&& Squad.PendingRowLength > 0
 			&& DistanceToTarget <= FAlgonaSquad::RowLengthApplyDistanceCm)
 		{
 			Squad.ApplyRowLengthOrder(Squad.PendingRowLength);
 			Squad.PendingRowLength = 0;
 		}
 
-		if (DistanceToTarget <= KINDA_SMALL_NUMBER)
-		{
-			// Центр уже в цели: приказ завершён, Squad принимает конечное
-			// направление (пока мгновенно; плавно — на шаге поворота).
-			Squad.CenterLocation = Squad.TargetCenterLocation;
-			Squad.FacingDirection = Squad.FinalFacingDirection;
-			Squad.bHasMoveTarget = false;
+		const bool bNeedsMove =
+			Squad.bHasMoveTarget && DistanceToTarget > KINDA_SMALL_NUMBER;
+		const FVector MoveDirection = bNeedsMove
+			? ToTarget / DistanceToTarget
+			: FVector::ZeroVector;
 
-			bAnyCenterChanged |=
-				!OldCenterLocation.Equals(
-					Squad.CenterLocation,
-					KINDA_SMALL_NUMBER);
+		const double MaxYawRate = static_cast<double>(Squad.GetMaxYawRate());
+
+		// 1. Желаемое направление. На марше — по ходу движения, пока до цели
+		// дальше, чем Squad пройдёт за время поворота к конечному направлению
+		// (путь = скорость * угол / угловая скорость). Так поворот
+		// заканчивается ровно по прибытии.
+		FVector DesiredForward = Squad.FinalFacingDirection;
+
+		if (bNeedsMove && Squad.bMarching && !Squad.bFinalTurnStarted)
+		{
+			const double FinalTurnDistance =
+				static_cast<double>(Squad.CenterMoveSpeed)
+				* GetEffectiveTurnAngle(MoveDirection, Squad.FinalFacingDirection)
+				/ MaxYawRate;
+
+			if (DistanceToTarget <= FinalTurnDistance)
+			{
+				Squad.bFinalTurnStarted = true;
+			}
+			else
+			{
+				DesiredForward = MoveDirection;
+			}
 		}
-		else
-		{
-			// Пока направление меняется мгновенно; плавный поворот — задача L1.
-			const FVector MoveDirection = ToTarget / DistanceToTarget;
-			Squad.FacingDirection = MoveDirection;
 
+		const bool bDesiredIsFinal = DesiredForward.Equals(Squad.FinalFacingDirection);
+
+		// 2. Разворот больше 90° — мгновенно через зеркальные слоты,
+		// остаток — обычным поворотом.
+		double DeltaYaw = GetSignedYawDelta(Squad.GetForwardDirection2D(), DesiredForward);
+		bool bSquadChanged = false;
+
+		if (FMath::Abs(DeltaYaw) > MirrorTurnMinAngleRadians
+			&& ApplyMirrorTurn(Squad))
+		{
+			// Остаток поворота и движение начинаются плавно с нулевой скорости.
+			Squad.MirrorTurnStartRemainingSeconds = FAlgonaSquad::MirrorTurnStartSeconds;
+			StartSpeedScale = 0.0;
+
+			DeltaYaw = GetSignedYawDelta(Squad.GetForwardDirection2D(), DesiredForward);
+			bSquadChanged = true;
+		}
+
+		const bool bNeedsTurn = FMath::Abs(DeltaYaw) > TurnToleranceRadians;
+
+		// 3. Поворот строя вокруг центра. Движение и поворот идут одновременно,
+		// каждый с полной скоростью.
+		Squad.YawRate = 0.0f;
+
+		if (bNeedsTurn)
+		{
+			const double MaxYawStep = MaxYawRate * StartSpeedScale * DeltaTime;
+			const double YawStep = FMath::Clamp(DeltaYaw, -MaxYawStep, MaxYawStep);
+			const FVector Forward = Squad.GetForwardDirection2D();
+			const double NewYaw = FMath::Atan2(Forward.Y, Forward.X) + YawStep;
+
+			Squad.FacingDirection = FVector(FMath::Cos(NewYaw), FMath::Sin(NewYaw), 0.0);
+			Squad.YawRate = static_cast<float>(YawStep / DeltaTime);
+			DeltaYaw -= YawStep;
+			bSquadChanged = true;
+		}
+
+		// Поворот к конечному направлению закончен: убираем накопленную
+		// погрешность угла.
+		if (bDesiredIsFinal && FMath::Abs(DeltaYaw) <= TurnToleranceRadians)
+		{
+			Squad.FacingDirection = Squad.FinalFacingDirection;
+
+			if (!Squad.bHasMoveTarget || !bNeedsMove)
+			{
+				Squad.bHasFacingTarget = false;
+			}
+		}
+
+		// 4. Движение центра по прямой к цели.
+		if (Squad.bHasMoveTarget)
+		{
 			const double MaxMoveDistance =
-				static_cast<double>(Squad.CenterMoveSpeed) * DeltaTime;
+				static_cast<double>(Squad.CenterMoveSpeed) * StartSpeedScale * DeltaTime;
 
 			if (DistanceToTarget <= MaxMoveDistance)
 			{
 				Squad.CenterLocation = Squad.TargetCenterLocation;
-				Squad.FacingDirection = Squad.FinalFacingDirection;
 				Squad.bHasMoveTarget = false;
 			}
 			else
 			{
 				Squad.CenterLocation += MoveDirection * MaxMoveDistance;
 			}
-
-			bAnyCenterChanged = true;
 		}
 
 		// Скорость центра за этот тик — упреждение для L2: Unit сразу идут
 		// вместе с Squad, а не догоняют свои слоты.
-		Squad.CenterVelocity = DeltaTime > 0.0f
-			? (Squad.CenterLocation - OldCenterLocation)
-				/ static_cast<double>(DeltaTime)
-			: FVector::ZeroVector;
+		Squad.CenterVelocity =
+			(Squad.CenterLocation - OldCenterLocation) / static_cast<double>(DeltaTime);
 		Squad.CenterVelocity.Z = 0.0;
+
+		bSquadChanged |= !OldCenterLocation.Equals(Squad.CenterLocation, KINDA_SMALL_NUMBER);
+		bAnySquadChanged |= bSquadChanged;
 
 		if (IsSquadSpatialGridEnabled())
 		{
@@ -370,5 +529,5 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 		}
 	}
 
-	return bAnyCenterChanged;
+	return bAnySquadChanged;
 }
