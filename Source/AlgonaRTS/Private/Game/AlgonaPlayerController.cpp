@@ -32,6 +32,26 @@ namespace
 	constexpr double SelectionRingRadiusScale = 1.5;
 	constexpr double SelectionRingHeightOffset = 3.0;
 
+	// Мёртвая зона ПКМ, пиксели: пока курсор ближе к точке нажатия,
+	// это клик, и угол курсора вокруг цели ещё неустойчив.
+	constexpr double OrderDeadZonePixels = 20.0;
+
+	// Ширина строя: один шаг длины строки на столько пикселей сдвига курсора.
+	constexpr double RowLengthStepPixels = 40.0;
+
+	// Ограничение длины строки для приказа мышью.
+	constexpr int32 MaxOrderRowLength = 50;
+
+	// Стрелка предпросмотра: отступ от передней строки и длина, см.
+	constexpr double PreviewArrowOffset = 150.0;
+	constexpr double PreviewArrowLength = 400.0;
+
+	bool IsShiftDown(const APlayerController& Controller)
+	{
+		return Controller.IsInputKeyDown(EKeys::LeftShift)
+			|| Controller.IsInputKeyDown(EKeys::RightShift);
+	}
+
 	double GetUnitPickRadius(const FAlgonaSquad& Squad)
 	{
 		const double Spacing = FMath::Max(
@@ -204,6 +224,7 @@ void AAlgonaPlayerController::PlayerTick(float DeltaTime)
 
 	UpdateCameraInput(DeltaTime);
 	UpdateSelectionInput();
+	UpdateOrderInput();
 	UpdateSelectionRings();
 }
 
@@ -303,8 +324,7 @@ void AAlgonaPlayerController::UpdateSelectionInput()
 
 	// Без Shift выбор заменяется, с Shift Squad добавляются к выбору.
 	// Клик по пустой земле или пустая рамка без Shift снимают выбор.
-	const bool bAddToSelection =
-		IsInputKeyDown(EKeys::LeftShift) || IsInputKeyDown(EKeys::RightShift);
+	const bool bAddToSelection = IsShiftDown(*this);
 
 	TArray<int32> PickedSquadIds;
 
@@ -553,5 +573,265 @@ void AAlgonaPlayerController::UpdateSelectionRings()
 		}
 	}
 
+	// Предпросмотр приказа: круги слотов в целевой позиции. Слоты строятся
+	// тем же генератором формы и той же формулой, что в Simulation.
+	const FAlgonaSquad* OrderSquad = Simulation && bRightMousePressed && bOrderDragged
+		? Simulation->FindSquad(OrderSquadId)
+		: nullptr;
+
+	if (OrderSquad)
+	{
+		FAlgonaFormationParams PreviewParams = OrderSquad->FormationParams;
+		PreviewParams.RowLength = OrderRowLength;
+
+		FAlgonaFormationLayout PreviewLayout;
+		BuildAlgonaFormationLayout(
+			PreviewParams,
+			OrderSquad->ActiveUnitIds.Num(),
+			PreviewLayout);
+
+		const FVector RingScale = AAlgonaSelectionPresentationActor::GetRingScale(
+			OrderSquad->UnitRadius * SelectionRingRadiusScale);
+
+		for (const FAlgonaFormationSlot& Slot : PreviewLayout.Slots)
+		{
+			RingTransforms.Emplace(
+				FQuat::Identity,
+				GetAlgonaSlotWorldLocation(OrderTarget, OrderForward, Slot.LocalOffset)
+					+ FVector(0.0, 0.0, SelectionRingHeightOffset),
+				RingScale);
+		}
+	}
+
 	SelectionPresentation->SetRingTransforms(RingTransforms);
+}
+
+bool AAlgonaPlayerController::GetCursorGroundPoint(FVector& OutPoint) const
+{
+	FVector RayOrigin;
+	FVector RayDirection;
+
+	if (!DeprojectMousePositionToWorld(RayOrigin, RayDirection)
+		|| RayDirection.Z >= -UE_DOUBLE_KINDA_SMALL_NUMBER)
+	{
+		return false;
+	}
+
+	OutPoint = RayOrigin + RayDirection * (-RayOrigin.Z / RayDirection.Z);
+	OutPoint.Z = 0.0;
+	return true;
+}
+
+void AAlgonaPlayerController::UpdateOrderInput()
+{
+	const UWorld* World = GetWorld();
+	const UAlgonaSimulationSubsystem* Simulation =
+		World ? World->GetSubsystem<UAlgonaSimulationSubsystem>() : nullptr;
+
+	float MouseX = 0.0f;
+	float MouseY = 0.0f;
+	const bool bHasMouse = GetMousePosition(MouseX, MouseY);
+
+	// Нажатие ПКМ: цель — точка земли под курсором.
+	if (WasInputKeyJustPressed(EKeys::RightMouseButton))
+	{
+		FVector GroundPoint;
+		if (!Simulation
+			|| SelectedSquadIds.IsEmpty()
+			|| !bHasMouse
+			|| !GetCursorGroundPoint(GroundPoint))
+		{
+			return;
+		}
+
+		bRightMousePressed = true;
+		bOrderDragged = false;
+		bRotationAnchored = false;
+		bWidthMode = false;
+		RightMousePressPosition = FVector2D(MouseX, MouseY);
+		OrderTarget = GroundPoint;
+		OrderSquadId = INDEX_NONE;
+
+		// Поворот и ширина — только для одного Squad. Начальный вектор
+		// направления — от текущего центра Squad к цели.
+		if (SelectedSquadIds.Num() == 1)
+		{
+			if (const FAlgonaSquad* Squad = Simulation->FindSquad(SelectedSquadIds[0]))
+			{
+				OrderSquadId = Squad->SquadId;
+				OrderRowLength = Squad->FormationParams.RowLength;
+
+				const FVector ToTarget =
+					(OrderTarget - Squad->CenterLocation).GetSafeNormal2D();
+				OrderForward = ToTarget.IsNearlyZero()
+					? Squad->GetForwardDirection2D()
+					: ToTarget;
+			}
+		}
+	}
+
+	if (!bRightMousePressed)
+	{
+		return;
+	}
+
+	const double ScreenDistance = bHasMouse
+		? FVector2D::Distance(RightMousePressPosition, FVector2D(MouseX, MouseY))
+		: 0.0;
+
+	if (ScreenDistance > OrderDeadZonePixels)
+	{
+		bOrderDragged = true;
+	}
+
+	const FAlgonaSquad* OrderSquad =
+		Simulation ? Simulation->FindSquad(OrderSquadId) : nullptr;
+
+	if (OrderSquad && bHasMouse)
+	{
+		const bool bShiftDown = IsShiftDown(*this);
+
+		if (bShiftDown && !bWidthMode)
+		{
+			// Вход в режим ширины: направление фиксируется.
+			bWidthMode = true;
+			bOrderDragged = true;
+			WidthInitialScreenDistance = ScreenDistance;
+			WidthInitialRowLength = OrderRowLength;
+		}
+		else if (!bShiftDown && bWidthMode)
+		{
+			// Выход из режима ширины: вращение привязывается заново к
+			// текущему направлению, поэтому скачка нет.
+			bWidthMode = false;
+			bRotationAnchored = false;
+		}
+
+		if (bWidthMode)
+		{
+			// Дальше от цели — шире строй, ближе — уже. Центр не сдвигается.
+			const int32 RowLengthSteps = FMath::RoundToInt32(
+				(ScreenDistance - WidthInitialScreenDistance) / RowLengthStepPixels);
+
+			OrderRowLength = FMath::Clamp(
+				WidthInitialRowLength + RowLengthSteps,
+				AlgonaFormationLimits::MinRowLength,
+				FMath::Max(
+					FMath::Min(OrderSquad->ActiveUnitIds.Num(), MaxOrderRowLength),
+					AlgonaFormationLimits::MinRowLength));
+		}
+		else if (ScreenDistance > OrderDeadZonePixels)
+		{
+			// Вращение: угол курсора вокруг цели на плоскости земли.
+			// Направление = начальный вектор, повёрнутый на разницу углов
+			// (без накопления приращений).
+			FVector CursorGroundPoint;
+			if (GetCursorGroundPoint(CursorGroundPoint))
+			{
+				const FVector FromTarget = CursorGroundPoint - OrderTarget;
+				const double CursorAngleDegrees = FMath::RadiansToDegrees(
+					FMath::Atan2(FromTarget.Y, FromTarget.X));
+
+				if (!bRotationAnchored)
+				{
+					bRotationAnchored = true;
+					RotationInitialForward = OrderForward;
+					RotationInitialAngleDegrees = CursorAngleDegrees;
+				}
+				else
+				{
+					const double DeltaDegrees = FRotator::NormalizeAxis(
+						CursorAngleDegrees - RotationInitialAngleDegrees);
+
+					OrderForward = RotationInitialForward
+						.RotateAngleAxis(DeltaDegrees, FVector::UpVector)
+						.GetSafeNormal2D();
+				}
+			}
+		}
+	}
+
+	if (WasInputKeyJustReleased(EKeys::RightMouseButton))
+	{
+		SubmitMoveOrder();
+		bRightMousePressed = false;
+		bOrderDragged = false;
+		bRotationAnchored = false;
+		bWidthMode = false;
+		OrderSquadId = INDEX_NONE;
+	}
+}
+
+void AAlgonaPlayerController::SubmitMoveOrder()
+{
+	const UWorld* World = GetWorld();
+	UAlgonaSimulationSubsystem* Simulation =
+		World ? World->GetSubsystem<UAlgonaSimulationSubsystem>() : nullptr;
+
+	if (!Simulation || SelectedSquadIds.IsEmpty())
+	{
+		return;
+	}
+
+	// Пока приказы идут в Simulation напрямую; в мультиплеере — через
+	// запрос клиента серверу, дальше та же очередь команд.
+	const FAlgonaSquad* OrderSquad = Simulation->FindSquad(OrderSquadId);
+
+	if (OrderSquad && bOrderDragged)
+	{
+		// В приказ уходит ровно последнее показанное состояние.
+		const int32 RowLength =
+			OrderRowLength != OrderSquad->FormationParams.RowLength ? OrderRowLength : 0;
+
+		Simulation->SubmitMoveSquadCommand(
+			OrderSquadId,
+			OrderTarget,
+			OrderForward,
+			RowLength);
+		return;
+	}
+
+	// Клик ПКМ (или несколько Squad): направление — по пути,
+	// раскладку точек группы считает Simulation.
+	Simulation->SubmitMoveGroupCommand(SelectedSquadIds, OrderTarget);
+}
+
+bool AAlgonaPlayerController::GetOrderPreviewArrow(
+	FVector& OutStart,
+	FVector& OutEnd) const
+{
+	const UWorld* World = GetWorld();
+	const UAlgonaSimulationSubsystem* Simulation =
+		World ? World->GetSubsystem<UAlgonaSimulationSubsystem>() : nullptr;
+	const FAlgonaSquad* OrderSquad =
+		Simulation && bRightMousePressed && bOrderDragged
+			? Simulation->FindSquad(OrderSquadId)
+			: nullptr;
+
+	if (!OrderSquad)
+	{
+		return false;
+	}
+
+	// Стрелка стоит перед передней строкой. Положение передней строки
+	// зависит от длины строки, поэтому берётся из раскладки предпросмотра.
+	FAlgonaFormationParams PreviewParams = OrderSquad->FormationParams;
+	PreviewParams.RowLength = OrderRowLength;
+
+	FAlgonaFormationLayout PreviewLayout;
+	BuildAlgonaFormationLayout(
+		PreviewParams,
+		OrderSquad->ActiveUnitIds.Num(),
+		PreviewLayout);
+
+	OutStart = OrderTarget
+		+ OrderForward * (PreviewLayout.FrontRowLocalX + PreviewArrowOffset)
+		+ FVector(0.0, 0.0, SelectionRingHeightOffset);
+	OutEnd = OutStart + OrderForward * PreviewArrowLength;
+	return true;
+}
+
+bool AAlgonaPlayerController::ShouldShowSingleSquadOnlyMessage() const
+{
+	return bRightMousePressed && bOrderDragged && SelectedSquadIds.Num() > 1;
 }

@@ -34,6 +34,10 @@ namespace AlgonaSimulationDefaults
 	// Стресс-сценарий замеров P2: длина одного прохода ряда отрядов по Y, см.
 	inline constexpr double StressMoveDistanceCm = 4000.0;
 
+	// Групповой приказ: расстояние между точками центров Squad относительно
+	// размера самого крупного Squad группы.
+	inline constexpr double GroupSpacingFactor = 1.1;
+
 	// Dormant squad-level spatial index. Change only this value to re-enable
 	// population and updates when squad-level spatial queries are needed again.
 	inline constexpr bool EnableSquadSpatialGrid = false;
@@ -46,7 +50,11 @@ enum class EAlgonaSquadCommandType : uint8
 	Move,
 
 	// Приказ длины строки: Reform относительно центра Squad.
-	SetRowLength
+	SetRowLength,
+
+	// Групповой приказ: несколько Squad в одну точку. Точки центров
+	// раскладывает Simulation.
+	MoveGroup
 };
 
 /**
@@ -60,11 +68,19 @@ struct FAlgonaSquadCommand
 	EAlgonaSquadCommandType Type = EAlgonaSquadCommandType::Move;
 	int32 SquadId = INDEX_NONE;
 
-	// Move: целевая точка центра Squad.
+	// Move, MoveGroup: целевая точка центра Squad (центра группы).
 	FVector TargetLocation = FVector::ZeroVector;
 
+	// Move: конечное направление. Нулевой вектор — направление последнего
+	// отрезка пути (пока путь прямой — от центра Squad к цели).
+	FVector FinalDirection = FVector::ZeroVector;
+
 	// SetRowLength: запрошенная длина строки.
+	// Move: длина строки составного приказа; 0 — не менять.
 	int32 RowLength = 0;
+
+	// MoveGroup: Squad группы.
+	TArray<int32> SquadIds;
 };
 
 /**
@@ -210,6 +226,12 @@ public:
 	// применяются в начале следующего fixed step.
 	bool SubmitMoveSquadCommand(
 		int32 SquadId,
+		const FVector& TargetLocation,
+		const FVector& FinalDirection = FVector::ZeroVector,
+		int32 RowLength = 0);
+
+	bool SubmitMoveGroupCommand(
+		TConstArrayView<int32> SquadIds,
 		const FVector& TargetLocation);
 
 	bool SubmitSetRowLengthCommand(
@@ -309,6 +331,12 @@ private:
 
 	void RunSimulationStep(float DeltaTime);
 	void ProcessPendingCommands();
+	void ApplyMoveCommand(
+		FAlgonaSquad& Squad,
+		const FVector& TargetLocation,
+		const FVector& FinalDirection,
+		int32 RowLength);
+	void ApplyMoveGroupCommand(const FAlgonaSquadCommand& Command);
 	bool UpdateSquadCenters(float DeltaTime);
 
 	// Движение Unit (AlgonaSimulationMovement.cpp).

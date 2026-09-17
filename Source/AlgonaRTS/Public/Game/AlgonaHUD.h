@@ -5,9 +5,11 @@
 
 #include "AlgonaHUD.generated.h"
 
+class AAlgonaPlayerController;
+
 /**
- * Экранный интерфейс RTS. Пока рисует только рамку выбора,
- * состояние которой хранит AAlgonaPlayerController.
+ * Экранный интерфейс RTS: рамка выбора, стрелка предпросмотра приказа
+ * и сообщения. Состояние хранит AAlgonaPlayerController.
  */
 UCLASS(NotBlueprintable, Transient)
 class ALGONARTS_API AAlgonaHUD final : public AHUD
@@ -16,4 +18,7 @@ class ALGONARTS_API AAlgonaHUD final : public AHUD
 
 public:
 	virtual void DrawHUD() override;
+
+private:
+	void DrawOrderPreviewArrow(const AAlgonaPlayerController& AlgonaController);
 };

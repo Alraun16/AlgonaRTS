@@ -89,4 +89,14 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	float UnitSpeedFactor = 1.25f;
 
 	bool bHasMoveTarget = false;
+
+	// Конечное направление текущего приказа движения: Squad принимает его
+	// по прибытии. Движение его не перезаписывает.
+	FVector FinalFacingDirection = FVector::ForwardVector;
+
+	// Длина строки из составного приказа «движение + ширина»; 0 — нет.
+	// Применяется за RowLengthApplyDistanceCm до цели (или сразу, если ближе).
+	int32 PendingRowLength = 0;
+
+	static constexpr double RowLengthApplyDistanceCm = 1000.0;
 };

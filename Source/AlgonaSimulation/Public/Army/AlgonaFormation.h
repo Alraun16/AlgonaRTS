@@ -82,3 +82,18 @@ ALGONASIMULATION_API void BuildAlgonaFormationLayout(
 	const FAlgonaFormationParams& Params,
 	int32 SlotCount,
 	FAlgonaFormationLayout& OutLayout);
+
+/**
+ * Точка слота в мире по центру и направлению «вперёд» (на плоскости).
+ * Та же формула, что в конвейере движения: X — вперёд, Y — вправо.
+ */
+inline FVector GetAlgonaSlotWorldLocation(
+	const FVector& Center,
+	const FVector& Forward,
+	const FVector2f& LocalOffset)
+{
+	const FVector Right = FVector::CrossProduct(FVector::UpVector, Forward).GetSafeNormal();
+	return Center
+		+ Forward * static_cast<double>(LocalOffset.X)
+		+ Right * static_cast<double>(LocalOffset.Y);
+}

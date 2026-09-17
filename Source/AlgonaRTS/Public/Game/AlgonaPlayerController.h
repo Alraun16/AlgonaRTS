@@ -28,9 +28,22 @@ public:
 	/** Рамка выбора в пикселях viewport, если игрок сейчас её тянет. */
 	bool GetSelectionBox(FVector2D& OutMin, FVector2D& OutMax) const;
 
+	/** Стрелка направления предпросмотра приказа (мир), если он показан. */
+	bool GetOrderPreviewArrow(FVector& OutStart, FVector& OutEnd) const;
+
+	/** Зажат ПКМ с несколькими выбранными Squad: поворот и ширина недоступны. */
+	bool ShouldShowSingleSquadOnlyMessage() const;
+
 private:
 	void UpdateCameraInput(float DeltaTime);
 	void UpdateSelectionInput();
+	void UpdateOrderInput();
+
+	// Точка земли под курсором (земля пока плоская, Z = 0).
+	bool GetCursorGroundPoint(FVector& OutPoint) const;
+
+	// Отправка приказа движения выбранным Squad по состоянию ПКМ.
+	void SubmitMoveOrder();
 
 	// Squad, Unit которого находится под курсором, или INDEX_NONE.
 	int32 PickSquadUnderCursor() const;
@@ -58,6 +71,28 @@ private:
 	FVector2D LeftMouseCurrentPosition = FVector2D::ZeroVector;
 	bool bLeftMousePressed = false;
 	bool bBoxSelecting = false;
+
+	// Состояние ПКМ. Цель — центр Squad (или группы) в точке нажатия.
+	// Для одного Squad зажатый ПКМ задаёт конечное направление и ширину:
+	// хранится одно значение «вперёд» (OrderForward) и длина строки,
+	// из них строятся и предпросмотр, и приказ.
+	bool bRightMousePressed = false;
+	bool bOrderDragged = false;
+	FVector2D RightMousePressPosition = FVector2D::ZeroVector;
+	FVector OrderTarget = FVector::ZeroVector;
+	int32 OrderSquadId = INDEX_NONE;
+	FVector OrderForward = FVector::ForwardVector;
+	int32 OrderRowLength = 0;
+
+	// Вращение: начальный вектор и угол курсора вокруг цели в момент привязки.
+	bool bRotationAnchored = false;
+	FVector RotationInitialForward = FVector::ForwardVector;
+	double RotationInitialAngleDegrees = 0.0;
+
+	// Ширина (Shift): расстояние курсора до цели и длина строки при нажатии Shift.
+	bool bWidthMode = false;
+	double WidthInitialScreenDistance = 0.0;
+	int32 WidthInitialRowLength = 0;
 
 	// Переиспользуемый буфер transform кругов, чтобы не выделять память каждый кадр.
 	TArray<FTransform> RingTransforms;

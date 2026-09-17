@@ -308,7 +308,9 @@ int32 UAlgonaSimulationSubsystem::ExportUnitSnapshots(
 
 bool UAlgonaSimulationSubsystem::SubmitMoveSquadCommand(
 	int32 SquadId,
-	const FVector& TargetLocation)
+	const FVector& TargetLocation,
+	const FVector& FinalDirection,
+	int32 RowLength)
 {
 	if (!IsAuthoritativeSimulationWorld()
 		|| !Squads.IsValidIndex(SquadId)
@@ -322,6 +324,25 @@ bool UAlgonaSimulationSubsystem::SubmitMoveSquadCommand(
 	Command.Type = EAlgonaSquadCommandType::Move;
 	Command.SquadId = SquadId;
 	Command.TargetLocation = TargetLocation;
+	Command.FinalDirection = FinalDirection;
+	Command.RowLength = RowLength;
+	return true;
+}
+
+bool UAlgonaSimulationSubsystem::SubmitMoveGroupCommand(
+	TConstArrayView<int32> SquadIds,
+	const FVector& TargetLocation)
+{
+	if (!IsAuthoritativeSimulationWorld() || SquadIds.IsEmpty())
+	{
+		return false;
+	}
+
+	FAlgonaSquadCommand& Command =
+		PendingCommands.AddDefaulted_GetRef();
+	Command.Type = EAlgonaSquadCommandType::MoveGroup;
+	Command.TargetLocation = TargetLocation;
+	Command.SquadIds.Append(SquadIds.GetData(), SquadIds.Num());
 	return true;
 }
 
