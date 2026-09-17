@@ -2,30 +2,88 @@
 
 #include "Camera/AlgonaRTSCameraActor.h"
 #include "Core/AlgonaSimulationSubsystem.h"
+#include "Presentation/AlgonaSelectionPresentationActor.h"
 
-#include "DrawDebugHelpers.h"
+#include "Camera/PlayerCameraManager.h"
+#include "Engine/GameViewportClient.h"
+#include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
 #include "InputCoreTypes.h"
+#include "SceneView.h"
 
 namespace
 {
 	// Нажатие ЛКМ считается кликом, если мышь сдвинулась меньше, пиксели.
-	// Больший сдвиг — будущая рамка выбора.
+	// Больший сдвиг — рамка выбора.
 	constexpr float ClickMaxMousePixels = 6.0f;
 
 	// Эталонная высота Unit для попадания курсором, см. Позже — из типа Unit.
 	constexpr double UnitPickHeight = 170.0;
 
-	// Минимальный радиус попадания, чтобы по Unit было легко кликнуть, см.
+	// Радиус попадания по Unit, см. Берётся с запасом от интервала строя
+	// (больше половины интервала), чтобы клик между строками и рядом с Unit
+	// попадал в Squad. Пересечения зон соседних Unit решает выбор
+	// ближайшего к камере.
+	constexpr double PickRadiusSpacingFactor = 0.55;
 	constexpr double MinPickRadius = 50.0;
+	constexpr double MaxPickRadius = 300.0;
 
-	// Круги выбора: контур под каждым Unit выбранного Squad.
-	constexpr int32 SelectionCircleSegments = 24;
-	constexpr float SelectionCircleThickness = 3.0f;
+	// Круги выбора: крупнее самого Unit, чтобы были заметны; чуть над землёй.
+	constexpr double SelectionRingRadiusScale = 1.5;
+	constexpr double SelectionRingHeightOffset = 3.0;
 
-	// Круг выбора крупнее самого Unit, чтобы был заметен.
-	constexpr double SelectionCircleRadiusScale = 1.5;
-	constexpr double SelectionCircleHeightOffset = 3.0;
+	double GetUnitPickRadius(const FAlgonaSquad& Squad)
+	{
+		const double Spacing = FMath::Max(
+			Squad.FormationParams.SlotSpacing,
+			Squad.FormationParams.RowSpacing);
+
+		return FMath::Clamp(
+			FMath::Max(static_cast<double>(Squad.UnitRadius), Spacing * PickRadiusSpacingFactor),
+			MinPickRadius,
+			MaxPickRadius);
+	}
+
+	// Пересекает ли отрезок AB прямоугольник [Min, Max] (отсечение
+	// Лианга–Барски: сужаем допустимый участок отрезка по каждой оси).
+	bool SegmentIntersectsBox(
+		const FVector2D& A,
+		const FVector2D& B,
+		const FVector2D& Min,
+		const FVector2D& Max)
+	{
+		const FVector2D Delta = B - A;
+		double EnterT = 0.0;
+		double ExitT = 1.0;
+
+		for (int32 Axis = 0; Axis < 2; ++Axis)
+		{
+			if (FMath::IsNearlyZero(Delta[Axis]))
+			{
+				if (A[Axis] < Min[Axis] || A[Axis] > Max[Axis])
+				{
+					return false;
+				}
+				continue;
+			}
+
+			double T0 = (Min[Axis] - A[Axis]) / Delta[Axis];
+			double T1 = (Max[Axis] - A[Axis]) / Delta[Axis];
+			if (T0 > T1)
+			{
+				Swap(T0, T1);
+			}
+
+			EnterT = FMath::Max(EnterT, T0);
+			ExitT = FMath::Min(ExitT, T1);
+			if (EnterT > ExitT)
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
 
 	// Пересечение луча с вертикальным цилиндром (основание Base, радиус,
 	// высота). OutT — расстояние вдоль луча до точки входа.
@@ -106,6 +164,31 @@ void AAlgonaPlayerController::BeginPlay()
 
 	// Курсор нужен для выбора Squad и приказов.
 	bShowMouseCursor = true;
+
+	// Круги выбора — только у локального игрока.
+	if (IsLocalController())
+	{
+		FActorSpawnParameters SpawnParameters;
+		SpawnParameters.Owner = this;
+		SpawnParameters.ObjectFlags |= RF_Transient;
+
+		SelectionPresentation =
+			GetWorld()->SpawnActor<AAlgonaSelectionPresentationActor>(SpawnParameters);
+	}
+}
+
+bool AAlgonaPlayerController::GetSelectionBox(
+	FVector2D& OutMin,
+	FVector2D& OutMax) const
+{
+	if (!bBoxSelecting)
+	{
+		return false;
+	}
+
+	OutMin = FVector2D::Min(LeftMousePressPosition, LeftMouseCurrentPosition);
+	OutMax = FVector2D::Max(LeftMousePressPosition, LeftMouseCurrentPosition);
+	return true;
 }
 
 void AAlgonaPlayerController::SetRTSCamera(
@@ -121,7 +204,7 @@ void AAlgonaPlayerController::PlayerTick(float DeltaTime)
 
 	UpdateCameraInput(DeltaTime);
 	UpdateSelectionInput();
-	DrawSelectedSquads();
+	UpdateSelectionRings();
 }
 
 void AAlgonaPlayerController::UpdateCameraInput(float DeltaTime)
@@ -181,6 +264,7 @@ void AAlgonaPlayerController::UpdateCameraInput(float DeltaTime)
 	}
 }
 
+
 void AAlgonaPlayerController::UpdateSelectionInput()
 {
 	float MouseX = 0.0f;
@@ -190,40 +274,67 @@ void AAlgonaPlayerController::UpdateSelectionInput()
 	if (WasInputKeyJustPressed(EKeys::LeftMouseButton) && bHasMouse)
 	{
 		LeftMousePressPosition = FVector2D(MouseX, MouseY);
+		LeftMouseCurrentPosition = LeftMousePressPosition;
 		bLeftMousePressed = true;
+		bBoxSelecting = false;
 	}
 
-	if (!bLeftMousePressed
-		|| !WasInputKeyJustReleased(EKeys::LeftMouseButton))
+	if (!bLeftMousePressed)
 	{
 		return;
 	}
 
-	bLeftMousePressed = false;
-
-	// Сдвиг больше порога — рамка выбора (следующая часть шага).
-	if (!bHasMouse
-		|| FVector2D::Distance(LeftMousePressPosition, FVector2D(MouseX, MouseY))
+	// Пока ЛКМ зажата: сдвиг больше порога превращает клик в рамку
+	// (и дальше остаётся рамкой, даже если мышь вернулась назад).
+	if (bHasMouse)
+	{
+		LeftMouseCurrentPosition = FVector2D(MouseX, MouseY);
+		if (FVector2D::Distance(LeftMousePressPosition, LeftMouseCurrentPosition)
 			> ClickMaxMousePixels)
+		{
+			bBoxSelecting = true;
+		}
+	}
+
+	if (!WasInputKeyJustReleased(EKeys::LeftMouseButton))
 	{
 		return;
 	}
 
-	// Клик: без Shift выбор заменяется, с Shift Squad добавляется к выбору.
-	// Клик по пустой земле без Shift снимает выбор.
+	// Без Shift выбор заменяется, с Shift Squad добавляются к выбору.
+	// Клик по пустой земле или пустая рамка без Shift снимают выбор.
 	const bool bAddToSelection =
 		IsInputKeyDown(EKeys::LeftShift) || IsInputKeyDown(EKeys::RightShift);
 
-	const int32 PickedSquadId = PickSquadUnderCursor();
+	TArray<int32> PickedSquadIds;
+
+	if (bBoxSelecting)
+	{
+		FVector2D BoxMin;
+		FVector2D BoxMax;
+		GetSelectionBox(BoxMin, BoxMax);
+		CollectSquadsInScreenBox(BoxMin, BoxMax, PickedSquadIds);
+	}
+	else
+	{
+		const int32 PickedSquadId = PickSquadUnderCursor();
+		if (PickedSquadId != INDEX_NONE)
+		{
+			PickedSquadIds.Add(PickedSquadId);
+		}
+	}
+
+	bLeftMousePressed = false;
+	bBoxSelecting = false;
 
 	if (!bAddToSelection)
 	{
 		SelectedSquadIds.Reset();
 	}
 
-	if (PickedSquadId != INDEX_NONE)
+	for (const int32 SquadId : PickedSquadIds)
 	{
-		SelectedSquadIds.AddUnique(PickedSquadId);
+		SelectedSquadIds.AddUnique(SquadId);
 	}
 }
 
@@ -258,12 +369,13 @@ int32 AAlgonaPlayerController::PickSquadUnderCursor() const
 	const FVector GroundPoint = RayOrigin + RayDirection * GroundT;
 	const FVector TopPoint = RayOrigin + RayDirection * TopT;
 
+	// Запас — наибольший возможный радиус попадания.
 	const FVector2D BoundsMin(
-		FMath::Min(GroundPoint.X, TopPoint.X) - MinPickRadius * 2.0,
-		FMath::Min(GroundPoint.Y, TopPoint.Y) - MinPickRadius * 2.0);
+		FMath::Min(GroundPoint.X, TopPoint.X) - MaxPickRadius,
+		FMath::Min(GroundPoint.Y, TopPoint.Y) - MaxPickRadius);
 	const FVector2D BoundsMax(
-		FMath::Max(GroundPoint.X, TopPoint.X) + MinPickRadius * 2.0,
-		FMath::Max(GroundPoint.Y, TopPoint.Y) + MinPickRadius * 2.0);
+		FMath::Max(GroundPoint.X, TopPoint.X) + MaxPickRadius,
+		FMath::Max(GroundPoint.Y, TopPoint.Y) + MaxPickRadius);
 
 	TArray<uint32> CandidateUnitIds;
 	Simulation->QueryUnitIdsInBounds(BoundsMin, BoundsMax, CandidateUnitIds);
@@ -287,16 +399,12 @@ int32 AAlgonaPlayerController::PickSquadUnderCursor() const
 			continue;
 		}
 
-		const double PickRadius = FMath::Max(
-			static_cast<double>(Squad->UnitRadius),
-			MinPickRadius);
-
 		double HitT = 0.0;
 		if (IntersectRayVerticalCylinder(
 				RayOrigin,
 				RayDirection,
 				UnitPosition,
-				PickRadius,
+				GetUnitPickRadius(*Squad),
 				UnitPickHeight,
 				HitT)
 			&& HitT < NearestT)
@@ -309,20 +417,47 @@ int32 AAlgonaPlayerController::PickSquadUnderCursor() const
 	return PickedSquadId;
 }
 
-void AAlgonaPlayerController::DrawSelectedSquads() const
+void AAlgonaPlayerController::CollectSquadsInScreenBox(
+	const FVector2D& BoxMin,
+	const FVector2D& BoxMax,
+	TArray<int32>& OutSquadIds) const
 {
 	const UWorld* World = GetWorld();
 	const UAlgonaSimulationSubsystem* Simulation =
 		World ? World->GetSubsystem<UAlgonaSimulationSubsystem>() : nullptr;
+	const ULocalPlayer* LocalPlayer = GetLocalPlayer();
 
-	if (!Simulation)
+	if (!Simulation
+		|| !LocalPlayer
+		|| !LocalPlayer->ViewportClient
+		|| !LocalPlayer->ViewportClient->Viewport)
 	{
 		return;
 	}
 
-	// Временная отрисовка отладочными линиями: достаточно для небольшого
-	// выбора. Для выбора рамкой многих Squad круги перейдут на инстансы.
-	for (const int32 SquadId : SelectedSquadIds)
+	// Матрица камеры берётся один раз на всю проверку, а не на каждый Unit.
+	FSceneViewProjectionData ProjectionData;
+	if (!LocalPlayer->GetProjectionData(
+			LocalPlayer->ViewportClient->Viewport,
+			ProjectionData))
+	{
+		return;
+	}
+
+	const FIntRect ViewRect = ProjectionData.GetConstrainedViewRect();
+	const FMatrix ViewProjectionMatrix = ProjectionData.ComputeViewProjectionMatrix();
+
+	const FVector CameraRight = PlayerCameraManager
+		? PlayerCameraManager->GetCameraRotation().RotateVector(FVector::RightVector)
+		: FVector::RightVector;
+
+	// Каждый Unit — экранный отрезок «ноги–голова», утолщённый на экранный
+	// радиус Unit. Утолщение учитывается расширением рамки на этот радиус.
+	// Squad выбирается по первому попавшему Unit, остальные не проверяются.
+	// Проверка идёт только при отпускании ЛКМ, поэтому полный перебор допустим.
+	const int32 SquadCount = Simulation->GetSquadCount();
+
+	for (int32 SquadId = 0; SquadId < SquadCount; ++SquadId)
 	{
 		const FAlgonaSquad* Squad = Simulation->FindSquad(SquadId);
 		if (!Squad)
@@ -338,19 +473,85 @@ void AAlgonaPlayerController::DrawSelectedSquads() const
 				continue;
 			}
 
-			DrawDebugCircle(
-				World,
-				UnitPosition + FVector(0.0, 0.0, SelectionCircleHeightOffset),
-				Squad->UnitRadius * SelectionCircleRadiusScale,
-				SelectionCircleSegments,
-				FColor::Red,
-				false,
-				-1.0f,
-				0,
-				SelectionCircleThickness,
-				FVector::ForwardVector,
-				FVector::RightVector,
-				false);
+			FVector2D FootScreen;
+			FVector2D HeadScreen;
+			FVector2D SideScreen;
+
+			// Точки за камерой не проецируются — такой Unit не в рамке.
+			if (!FSceneView::ProjectWorldToScreen(
+					UnitPosition,
+					ViewRect,
+					ViewProjectionMatrix,
+					FootScreen)
+				|| !FSceneView::ProjectWorldToScreen(
+					UnitPosition + FVector(0.0, 0.0, UnitPickHeight),
+					ViewRect,
+					ViewProjectionMatrix,
+					HeadScreen)
+				|| !FSceneView::ProjectWorldToScreen(
+					UnitPosition + CameraRight * Squad->UnitRadius,
+					ViewRect,
+					ViewProjectionMatrix,
+					SideScreen))
+			{
+				continue;
+			}
+
+			const double ScreenRadius = FVector2D::Distance(FootScreen, SideScreen);
+			const FVector2D Expand(ScreenRadius, ScreenRadius);
+
+			if (SegmentIntersectsBox(
+					FootScreen,
+					HeadScreen,
+					BoxMin - Expand,
+					BoxMax + Expand))
+			{
+				OutSquadIds.Add(SquadId);
+				break;
+			}
 		}
 	}
+}
+
+void AAlgonaPlayerController::UpdateSelectionRings()
+{
+	if (!SelectionPresentation)
+	{
+		return;
+	}
+
+	const UWorld* World = GetWorld();
+	const UAlgonaSimulationSubsystem* Simulation =
+		World ? World->GetSubsystem<UAlgonaSimulationSubsystem>() : nullptr;
+
+	RingTransforms.Reset();
+
+	if (Simulation)
+	{
+		for (const int32 SquadId : SelectedSquadIds)
+		{
+			const FAlgonaSquad* Squad = Simulation->FindSquad(SquadId);
+			if (!Squad)
+			{
+				continue;
+			}
+
+			const FVector RingScale = AAlgonaSelectionPresentationActor::GetRingScale(
+				Squad->UnitRadius * SelectionRingRadiusScale);
+
+			for (const uint32 UnitId : Squad->ActiveUnitIds)
+			{
+				FVector UnitPosition;
+				if (Simulation->GetUnitPosition(UnitId, UnitPosition))
+				{
+					RingTransforms.Emplace(
+						FQuat::Identity,
+						UnitPosition + FVector(0.0, 0.0, SelectionRingHeightOffset),
+						RingScale);
+				}
+			}
+		}
+	}
+
+	SelectionPresentation->SetRingTransforms(RingTransforms);
 }
