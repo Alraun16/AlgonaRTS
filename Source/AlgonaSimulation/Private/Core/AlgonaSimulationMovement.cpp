@@ -83,6 +83,12 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 			static_cast<float>(Squad.CenterVelocity.X),
 			static_cast<float>(Squad.CenterVelocity.Y));
 		Frame.YawRate = Squad.YawRate;
+
+		// В среднем режиме Unit смотрят по направлению движения, даже стоя
+		// в своих слотах: «лунный бег» боком на десяток метров выглядит странно.
+		Frame.bUnitsFaceMovement =
+			Squad.bHasMoveTarget
+			&& Squad.MoveMode != EAlgonaSquadMoveMode::Sidestep;
 		Frame.UnitAcceleration =
 			Squad.CenterMoveSpeed * Squad.UnitSpeedFactor
 			/ FAlgonaSquad::UnitAccelerationSeconds;
@@ -196,7 +202,8 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 				static_cast<float>(SlotPosition.Y - Position.Y)).SizeSquared();
 
 			const bool bFaceMovement =
-				DistanceToSlotSquared > FaceMovementMinDistanceSquared
+				(Frame.bUnitsFaceMovement
+					|| DistanceToSlotSquared > FaceMovementMinDistanceSquared)
 				&& Velocity.SizeSquared() > IdleSpeedSquared;
 
 			const float TargetYaw = bFaceMovement

@@ -7,6 +7,13 @@
 
 class AAlgonaRTSCameraActor;
 class AAlgonaSelectionPresentationActor;
+
+/** Точка, куда идёт выбранный Squad: центр цели и размер отметки. */
+struct FAlgonaOrderTargetMarker
+{
+	FVector Location = FVector::ZeroVector;
+	double Radius = 0.0;
+};
 struct FAlgonaSquad;
 
 /**
@@ -33,6 +40,9 @@ public:
 
 	/** Зажат ПКМ с несколькими выбранными Squad: поворот и ширина недоступны. */
 	bool ShouldShowSingleSquadOnlyMessage() const;
+
+	/** Точки приказов выбранных Squad, которые сейчас идут к цели. */
+	void GetOrderTargetMarkers(TArray<FAlgonaOrderTargetMarker>& OutMarkers) const;
 
 private:
 	void UpdateCameraInput(float DeltaTime);

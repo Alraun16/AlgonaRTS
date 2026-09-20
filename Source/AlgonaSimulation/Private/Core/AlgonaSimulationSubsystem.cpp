@@ -37,6 +37,21 @@ namespace
 		TEXT("Overrides the move speed of every squad in cm/s. 0 keeps each squad own speed."),
 		ECVF_Default);
 
+	// Границы режимов движения Squad: подбираются прямо в запущенной игре.
+	// Режим выбирается при получении приказа, поэтому новое значение
+	// действует со следующего приказа.
+	TAutoConsoleVariable<float> CVarAlgonaP2SidestepMaxDistance(
+		TEXT("algona.P2.SidestepMaxDistance"),
+		FAlgonaSquad::SidestepMaxDistanceCm,
+		TEXT("Max path length in cm for the sidestep mode: squad keeps its facing and units face the squad."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<float> CVarAlgonaP2FaceMovementMaxDistance(
+		TEXT("algona.P2.FaceMovementMaxDistance"),
+		FAlgonaSquad::FaceMovementMaxDistanceCm,
+		TEXT("Max path length in cm for the face-movement mode: squad keeps its facing, units face the movement. Longer paths use the march mode."),
+		ECVF_Default);
+
 	// Период отчёта метрик в лог по реальному времени, а не по числу шагов:
 	// при сильной перегрузке отчёт всё равно приходит. 0 — выключено.
 	TAutoConsoleVariable<float> CVarAlgonaP2MetricsReportSeconds(
@@ -567,4 +582,14 @@ bool UAlgonaSimulationSubsystem::IsAuthoritativeSimulationWorld() const
 float UAlgonaSimulationSubsystem::GetSquadMoveSpeedOverride()
 {
 	return CVarAlgonaP2SquadMoveSpeed.GetValueOnGameThread();
+}
+
+float UAlgonaSimulationSubsystem::GetSidestepMaxDistance()
+{
+	return CVarAlgonaP2SidestepMaxDistance.GetValueOnGameThread();
+}
+
+float UAlgonaSimulationSubsystem::GetFaceMovementMaxDistance()
+{
+	return CVarAlgonaP2FaceMovementMaxDistance.GetValueOnGameThread();
 }

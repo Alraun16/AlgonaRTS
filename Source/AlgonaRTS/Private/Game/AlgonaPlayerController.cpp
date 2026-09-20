@@ -30,6 +30,9 @@ namespace
 
 	// Круги выбора: крупнее самого Unit, чтобы были заметны; чуть над землёй.
 	constexpr double SelectionRingRadiusScale = 1.5;
+
+	// Отметка точки приказа вписана в круг в полтора раза шире круга выбора.
+	constexpr double OrderMarkerRadiusScale = 1.5;
 	constexpr double SelectionRingHeightOffset = 3.0;
 
 	// Мёртвая зона ПКМ, пиксели: пока курсор ближе к точке нажатия,
@@ -284,7 +287,6 @@ void AAlgonaPlayerController::UpdateCameraInput(float DeltaTime)
 		CameraActor->Zoom(ZoomInput);
 	}
 }
-
 
 void AAlgonaPlayerController::UpdateSelectionInput()
 {
@@ -834,4 +836,37 @@ bool AAlgonaPlayerController::GetOrderPreviewArrow(
 bool AAlgonaPlayerController::ShouldShowSingleSquadOnlyMessage() const
 {
 	return bRightMousePressed && bOrderDragged && SelectedSquadIds.Num() > 1;
+}
+
+void AAlgonaPlayerController::GetOrderTargetMarkers(
+	TArray<FAlgonaOrderTargetMarker>& OutMarkers) const
+{
+	const UWorld* World = GetWorld();
+	const UAlgonaSimulationSubsystem* Simulation =
+		World ? World->GetSubsystem<UAlgonaSimulationSubsystem>() : nullptr;
+
+	if (!Simulation)
+	{
+		return;
+	}
+
+	// Отметка видна, пока Squad выбран и идёт к цели.
+	for (const int32 SquadId : SelectedSquadIds)
+	{
+		const FAlgonaSquad* Squad = Simulation->FindSquad(SquadId);
+		if (!Squad || !Squad->bHasMoveTarget)
+		{
+			continue;
+		}
+
+		FAlgonaOrderTargetMarker& Marker = OutMarkers.AddDefaulted_GetRef();
+		Marker.Location = Squad->TargetCenterLocation
+			+ FVector(0.0, 0.0, SelectionRingHeightOffset);
+
+		// Отметка со стрелками вписана в круг в полтора раза шире
+		// круга выбора под Unit.
+		Marker.Radius = Squad->UnitRadius
+			* SelectionRingRadiusScale
+			* OrderMarkerRadiusScale;
+	}
 }

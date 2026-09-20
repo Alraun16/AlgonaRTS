@@ -5,6 +5,25 @@
 #include "CoreMinimal.h"
 
 /**
+ * Как Squad движется к цели. Режим выбирается по длине пути при получении
+ * приказа и не меняется до следующего приказа.
+ */
+enum class EAlgonaSquadMoveMode : uint8
+{
+	// Короткий путь: Squad сохраняет конечное направление, Unit смотрят
+	// по направлению Squad — шаг вбок или назад.
+	Sidestep,
+
+	// Средний путь: Squad сохраняет конечное направление, но Unit уже
+	// смотрят по направлению движения.
+	FaceMovement,
+
+	// Длинный путь: Squad поворачивается по ходу движения и доворачивает
+	// к конечному направлению на подходе к цели.
+	March
+};
+
+/**
  * Authoritative state of one RTS squad.
  *
  * Раскладка слотов (где стоять) отделена от назначения (кто где стоит):
@@ -118,11 +137,8 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	// прибытия центра).
 	bool bHasFacingTarget = false;
 
-	// Режим марша (длинный путь): Squad поворачивается по ходу движения и
-	// поворачивается к конечному направлению только на подходе к цели.
-	// На коротком пути Squad сразу поворачивается к конечному направлению
-	// и идёт боком или спиной.
-	bool bMarching = false;
+	// Режим движения текущего приказа.
+	EAlgonaSquadMoveMode MoveMode = EAlgonaSquadMoveMode::March;
 
 	// Марш: поворот к конечному направлению на подходе уже начат.
 	bool bFinalTurnStarted = false;
@@ -155,9 +171,13 @@ struct ALGONASIMULATION_API FAlgonaSquad
 
 	static constexpr double RowLengthApplyDistanceCm = 1000.0;
 
-	// Путь считается маршем, если он длиннее обоих порогов:
-	// MarchMinDistanceCm и MarchMinRadiusFactor радиусов раскладки.
-	static constexpr double MarchMinDistanceCm = 2000.0;
+	// Границы режимов движения по длине пути, см. Отсчитаны от интервала
+	// строя (150 см): шаг вбок — до пяти юнитов, движение лицом вперёд без
+	// разворота строя — до десяти, дальше марш. Марш к тому же не начинается
+	// раньше MarchMinRadiusFactor радиусов раскладки: широкому строю
+	// разворачиваться ради короткого пути незачем.
+	static constexpr double SidestepMaxDistanceCm = 1000.0;
+	static constexpr double FaceMovementMaxDistanceCm = 2000.0;
 	static constexpr double MarchMinRadiusFactor = 2.0;
 
 	// Марш: доля пути, на которой начинается доворот к конечному

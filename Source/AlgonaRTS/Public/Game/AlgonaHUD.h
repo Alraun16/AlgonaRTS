@@ -21,4 +21,5 @@ public:
 
 private:
 	void DrawOrderPreviewArrow(const AAlgonaPlayerController& AlgonaController);
+	void DrawOrderTargetMarkers(const AAlgonaPlayerController& AlgonaController);
 };

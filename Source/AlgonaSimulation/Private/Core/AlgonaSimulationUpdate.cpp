@@ -178,13 +178,27 @@ void UAlgonaSimulationSubsystem::ApplyMoveCommand(
 	Squad.bHasFacingTarget = true;
 	Squad.bFinalTurnStarted = false;
 
-	// Режим марша решается один раз при получении приказа.
+	// Режим движения решается один раз при получении приказа.
 	const double PathLength =
 		FVector::Dist2D(Squad.CenterLocation, Squad.TargetCenterLocation);
-	Squad.bMarching = PathLength > FMath::Max(
-		FAlgonaSquad::MarchMinDistanceCm,
+
+	const double MarchMinDistance = FMath::Max(
+		static_cast<double>(GetFaceMovementMaxDistance()),
 		FAlgonaSquad::MarchMinRadiusFactor
 			* static_cast<double>(Squad.FormationLayout.Radius));
+
+	if (PathLength > MarchMinDistance)
+	{
+		Squad.MoveMode = EAlgonaSquadMoveMode::March;
+	}
+	else if (PathLength > static_cast<double>(GetSidestepMaxDistance()))
+	{
+		Squad.MoveMode = EAlgonaSquadMoveMode::FaceMovement;
+	}
+	else
+	{
+		Squad.MoveMode = EAlgonaSquadMoveMode::Sidestep;
+	}
 }
 
 void UAlgonaSimulationSubsystem::ApplyMoveGroupCommand(
@@ -446,7 +460,9 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 		// заканчивается ровно по прибытии.
 		FVector DesiredForward = Squad.FinalFacingDirection;
 
-		if (bNeedsMove && Squad.bMarching && !Squad.bFinalTurnStarted)
+		if (bNeedsMove
+			&& Squad.MoveMode == EAlgonaSquadMoveMode::March
+			&& !Squad.bFinalTurnStarted)
 		{
 			const double FinalTurnDistance =
 				static_cast<double>(Squad.CenterMoveSpeed)

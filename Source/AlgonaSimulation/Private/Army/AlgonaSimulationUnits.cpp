@@ -339,7 +339,6 @@ int32 UAlgonaSimulationSubsystem::ExportUnitSnapshotsForUnitIds(
 	for (int32 Index = 0; Index < SelectedUnitCount; ++Index)
 	{
 		AppendUnitSnapshot(UnitIds[Index], OutSnapshots);
-
 	}
 
 	return OutSnapshots.Num();

@@ -301,6 +301,7 @@ private:
 		float YawRate = 0.0f;
 		float FacingYaw = 0.0f;
 		float UnitAcceleration = 0.0f;
+		bool bUnitsFaceMovement = false;
 		float UnitMaxSpeed = 0.0f;
 	};
 
@@ -346,6 +347,10 @@ private:
 
 	// Значение CVar algona.P2.SquadMoveSpeed; 0 — подмены нет.
 	static float GetSquadMoveSpeedOverride();
+
+	// Границы режимов движения Squad, см (CVar algona.P2.*Distance).
+	static float GetSidestepMaxDistance();
+	static float GetFaceMovementMaxDistance();
 	bool UpdateSquadCenters(float DeltaTime);
 
 	// Движение Unit (AlgonaSimulationMovement.cpp).
