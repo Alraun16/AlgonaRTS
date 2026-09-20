@@ -300,6 +300,7 @@ private:
 		FVector2f CenterVelocity = FVector2f::ZeroVector;
 		float YawRate = 0.0f;
 		float FacingYaw = 0.0f;
+		float UnitAcceleration = 0.0f;
 		float UnitMaxSpeed = 0.0f;
 	};
 

@@ -6,6 +6,21 @@ FVector FAlgonaSquad::GetForwardDirection2D() const
 	return Forward.IsNearlyZero() ? FVector::ForwardVector : Forward;
 }
 
+float FAlgonaSquad::GetMoveAcceleration() const
+{
+	return CenterMoveSpeed / AccelerationSeconds;
+}
+
+float FAlgonaSquad::GetMoveDeceleration() const
+{
+	return GetMoveAcceleration() * DecelerationFactor;
+}
+
+float FAlgonaSquad::GetYawAcceleration() const
+{
+	return GetMaxYawRate() / AccelerationSeconds;
+}
+
 float FAlgonaSquad::GetMaxYawRate() const
 {
 	// Угловая скорость = линейная скорость крайнего слота / его радиус.

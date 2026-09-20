@@ -1,13 +1,19 @@
 #include "Core/AlgonaSimulationSubsystem.h"
 
+#include "Army/AlgonaUnitSteering.h"
+
 #include "HAL/PlatformTime.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
 namespace
 {
 	// Поворот больше этого угла выполняется через зеркальные слоты.
-	// Небольшой запас сверх 90°, чтобы при ровно 90° не было разворота.
-	constexpr double MirrorTurnMinAngleRadians = UE_DOUBLE_HALF_PI + 1.0e-3;
+	// 135°, а не 90°: зеркальный разворот мгновенный и по углу выгоден уже
+	// с 91°, но тогда отряд на повороте в 110° сначала показывает цели
+	// спину и доворачивает в обратную сторону. С 135° зеркало остаётся
+	// только для настоящих разворотов назад.
+	constexpr double MirrorTurnMinAngleRadians =
+		UE_DOUBLE_PI * 0.75 + 1.0e-3;
 
 	// Направления совпадают, если угол между ними меньше, рад.
 	constexpr double TurnToleranceRadians = 1.0e-4;
@@ -376,6 +382,7 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 			|| DeltaTime <= 0.0f)
 		{
 			Squad.CenterVelocity = FVector::ZeroVector;
+			Squad.CenterSpeed = 0.0f;
 			Squad.YawRate = 0.0f;
 			continue;
 		}
@@ -420,7 +427,18 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 			? ToTarget / DistanceToTarget
 			: FVector::ZeroVector;
 
-		const double MaxYawRate = static_cast<double>(Squad.GetMaxYawRate());
+		// Скорость крайнего слота = скорость центра + скорость от вращения.
+		// Пока Squad идёт, вращению остаётся только часть общего бюджета.
+		const double SlotSpeedBudget = FMath::Max(
+			static_cast<double>(Squad.MaxSlotSpeedFactor * Squad.CenterMoveSpeed
+				- Squad.CenterSpeed),
+			static_cast<double>(Squad.MinTurnRateFactor * Squad.CenterMoveSpeed));
+
+		const double MaxYawRate = FMath::Min(
+			static_cast<double>(Squad.GetMaxYawRate()),
+			static_cast<double>(Squad.GetMaxYawRate())
+				* SlotSpeedBudget
+				/ static_cast<double>(Squad.TurnSpeedFactor * Squad.CenterMoveSpeed));
 
 		// 1. Желаемое направление. На марше — по ходу движения, пока до цели
 		// дальше, чем Squad пройдёт за время поворота к конечному направлению
@@ -433,7 +451,8 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 			const double FinalTurnDistance =
 				static_cast<double>(Squad.CenterMoveSpeed)
 				* GetEffectiveTurnAngle(MoveDirection, Squad.FinalFacingDirection)
-				/ MaxYawRate;
+				/ MaxYawRate
+				* FAlgonaSquad::FinalTurnDistanceFactor;
 
 			if (DistanceToTarget <= FinalTurnDistance)
 			{
@@ -465,14 +484,38 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 
 		const bool bNeedsTurn = FMath::Abs(DeltaYaw) > TurnToleranceRadians;
 
-		// 3. Поворот строя вокруг центра. Движение и поворот идут одновременно,
-		// каждый с полной скоростью.
-		Squad.YawRate = 0.0f;
+		// 3. Поворот строя вокруг центра. Движение и поворот идут
+		// одновременно, каждый со своим разгоном и торможением.
+		// Желаемая угловая скорость ограничена и максимумом, и торможением
+		// к нужному углу, чтобы строй встал точно в направлении, а не качался.
+		const double YawAcceleration = static_cast<double>(Squad.GetYawAcceleration());
+		const double YawDeceleration = YawAcceleration * FAlgonaSquad::DecelerationFactor;
 
-		if (bNeedsTurn)
+		double DesiredYawRate = FMath::Min(
+			MaxYawRate * StartSpeedScale,
+			static_cast<double>(AlgonaUnitSteering::GetArrivalSpeedLimit(
+				static_cast<float>(FMath::Abs(DeltaYaw)),
+				static_cast<float>(YawDeceleration))));
+
+		DesiredYawRate = bNeedsTurn
+			? FMath::Sign(DeltaYaw) * DesiredYawRate
+			: 0.0;
+
+		Squad.YawRate = AlgonaUnitSteering::StepValueTowards(
+			Squad.YawRate,
+			static_cast<float>(DesiredYawRate),
+			static_cast<float>(YawAcceleration),
+			static_cast<float>(YawDeceleration),
+			DeltaTime);
+
+		if (Squad.YawRate != 0.0f)
 		{
-			const double MaxYawStep = MaxYawRate * StartSpeedScale * DeltaTime;
-			const double YawStep = FMath::Clamp(DeltaYaw, -MaxYawStep, MaxYawStep);
+			// Поворот не перелетает нужный угол.
+			const double YawStep = FMath::Clamp(
+				static_cast<double>(Squad.YawRate) * DeltaTime,
+				FMath::Min(DeltaYaw, 0.0),
+				FMath::Max(DeltaYaw, 0.0));
+
 			const FVector Forward = Squad.GetForwardDirection2D();
 			const double NewYaw = FMath::Atan2(Forward.Y, Forward.X) + YawStep;
 
@@ -494,20 +537,42 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 			}
 		}
 
-		// 4. Движение центра по прямой к цели.
+		// 4. Движение центра по прямой к цели с разгоном и торможением.
+		// Желаемая скорость ограничена торможением к цели, поэтому центр
+		// встаёт ровно в цели, а не проскакивает её.
+		const double MoveAcceleration = static_cast<double>(Squad.GetMoveAcceleration());
+		const double MoveDeceleration = static_cast<double>(Squad.GetMoveDeceleration());
+
+		const double DesiredSpeed = bNeedsMove
+			? FMath::Min3(
+				static_cast<double>(Squad.CenterMoveSpeed),
+				static_cast<double>(Squad.CenterMoveSpeed) * StartSpeedScale,
+				static_cast<double>(AlgonaUnitSteering::GetArrivalSpeedLimit(
+					static_cast<float>(DistanceToTarget),
+					static_cast<float>(MoveDeceleration))))
+			: 0.0;
+
+		Squad.CenterSpeed = AlgonaUnitSteering::StepValueTowards(
+			Squad.CenterSpeed,
+			static_cast<float>(DesiredSpeed),
+			static_cast<float>(MoveAcceleration),
+			static_cast<float>(MoveDeceleration),
+			DeltaTime);
+
 		if (Squad.bHasMoveTarget)
 		{
-			const double MaxMoveDistance =
-				static_cast<double>(Squad.CenterMoveSpeed) * StartSpeedScale * DeltaTime;
+			const double MoveDistance =
+				static_cast<double>(Squad.CenterSpeed) * DeltaTime;
 
-			if (DistanceToTarget <= MaxMoveDistance)
+			if (DistanceToTarget <= MoveDistance + KINDA_SMALL_NUMBER)
 			{
 				Squad.CenterLocation = Squad.TargetCenterLocation;
+				Squad.CenterSpeed = 0.0f;
 				Squad.bHasMoveTarget = false;
 			}
 			else
 			{
-				Squad.CenterLocation += MoveDirection * MaxMoveDistance;
+				Squad.CenterLocation += MoveDirection * MoveDistance;
 			}
 		}
 

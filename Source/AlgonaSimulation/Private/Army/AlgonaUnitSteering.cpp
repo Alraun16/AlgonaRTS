@@ -63,3 +63,60 @@ float AlgonaUnitSteering::StepYawTowards(
 	return FMath::UnwindRadians(
 		CurrentYaw + FMath::Sign(Delta) * MaxStep);
 }
+
+FVector2f AlgonaUnitSteering::StepVelocityTowards(
+	const FVector2f& CurrentVelocity,
+	const FVector2f& DesiredVelocity,
+	float MaxAcceleration,
+	float MaxDeceleration,
+	float DeltaTime)
+{
+	const FVector2f VelocityDelta = DesiredVelocity - CurrentVelocity;
+	const float DeltaSize = VelocityDelta.Size();
+
+	if (DeltaSize <= UE_SMALL_NUMBER)
+	{
+		return DesiredVelocity;
+	}
+
+	// Разгон и торможение ограничены по-разному: торможение обычно резче.
+	const float MaxRate = DesiredVelocity.SizeSquared() >= CurrentVelocity.SizeSquared()
+		? MaxAcceleration
+		: MaxDeceleration;
+
+	const float MaxDeltaSize = MaxRate * DeltaTime;
+
+	return DeltaSize <= MaxDeltaSize
+		? DesiredVelocity
+		: CurrentVelocity + VelocityDelta * (MaxDeltaSize / DeltaSize);
+}
+
+float AlgonaUnitSteering::StepValueTowards(
+	float CurrentValue,
+	float TargetValue,
+	float MaxIncreaseRate,
+	float MaxDecreaseRate,
+	float DeltaTime)
+{
+	const float ValueDelta = TargetValue - CurrentValue;
+
+	// «Растёт» и «падает» — по модулю: скорость -5 -> -8 это разгон.
+	const float MaxRate = FMath::Abs(TargetValue) >= FMath::Abs(CurrentValue)
+		? MaxIncreaseRate
+		: MaxDecreaseRate;
+
+	const float MaxDelta = MaxRate * DeltaTime;
+
+	return FMath::Abs(ValueDelta) <= MaxDelta
+		? TargetValue
+		: CurrentValue + FMath::Sign(ValueDelta) * MaxDelta;
+}
+
+float AlgonaUnitSteering::GetArrivalSpeedLimit(
+	float Distance,
+	float Deceleration)
+{
+	return Distance > 0.0f && Deceleration > 0.0f
+		? FMath::Sqrt(2.0f * Deceleration * Distance)
+		: 0.0f;
+}

@@ -35,6 +35,34 @@ namespace AlgonaUnitSteering
 		float DeltaTime);
 
 	/**
+	 * Ограничение ускорения: приближает текущую скорость к желаемой не
+	 * быстрее MaxAcceleration (когда скорость растёт) или MaxDeceleration
+	 * (когда падает), см/с².
+	 */
+	ALGONASIMULATION_API FVector2f StepVelocityTowards(
+		const FVector2f& CurrentVelocity,
+		const FVector2f& DesiredVelocity,
+		float MaxAcceleration,
+		float MaxDeceleration,
+		float DeltaTime);
+
+	/** То же для скалярной величины (скорость центра Squad, угловая скорость). */
+	ALGONASIMULATION_API float StepValueTowards(
+		float CurrentValue,
+		float TargetValue,
+		float MaxIncreaseRate,
+		float MaxDecreaseRate,
+		float DeltaTime);
+
+	/**
+	 * Наибольшая скорость, с которой ещё можно пройти Distance и
+	 * остановиться ровно в конце при замедлении Deceleration: sqrt(2 a s).
+	 */
+	ALGONASIMULATION_API float GetArrivalSpeedLimit(
+		float Distance,
+		float Deceleration);
+
+	/**
 	 * Поворачивает угол CurrentYaw к TargetYaw кратчайшим путём,
 	 * не больше чем на MaxStep. Все углы в радианах.
 	 */

@@ -83,6 +83,9 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 			static_cast<float>(Squad.CenterVelocity.X),
 			static_cast<float>(Squad.CenterVelocity.Y));
 		Frame.YawRate = Squad.YawRate;
+		Frame.UnitAcceleration =
+			Squad.CenterMoveSpeed * Squad.UnitSpeedFactor
+			/ FAlgonaSquad::UnitAccelerationSeconds;
 		Frame.UnitMaxSpeed =
 			Squad.CenterMoveSpeed
 			* (Squad.YawRate != 0.0f
@@ -162,9 +165,14 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 
 			State.DesiredVelocities[UnitIndex] = DesiredVelocity;
 
-			// Фактическая скорость пока равна желаемой. На шаге инерции здесь
-			// появится ограничение ускорения.
-			Velocity = DesiredVelocity;
+			// Инерция: фактическая скорость подтягивается к желаемой не
+			// мгновенно. Правило подхода к слоту остаётся в желаемой скорости.
+			Velocity = AlgonaUnitSteering::StepVelocityTowards(
+				Velocity,
+				DesiredVelocity,
+				Frame.UnitAcceleration,
+				Frame.UnitAcceleration * FAlgonaSquad::DecelerationFactor,
+				DeltaTime);
 
 			// Новая позиция.
 			const FVector2f MoveDelta = Velocity * DeltaTime;

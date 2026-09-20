@@ -108,4 +108,123 @@ bool FAlgonaP2SteeringYawTest::RunTest(
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAlgonaP2UnitSteeringInertiaTest,
+	"Algona.P2.UnitSteering.Inertia",
+	EAutomationTestFlags_ApplicationContextMask
+		| EAutomationTestFlags::SmokeFilter);
+
+bool FAlgonaP2UnitSteeringInertiaTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+
+	using namespace AlgonaUnitSteering;
+
+	constexpr float Acceleration = 1000.0f;
+	constexpr float Deceleration = 2000.0f;
+
+	// Разгон ограничен ускорением, торможение — своим значением.
+	TestEqual(
+		TEXT("Acceleration is limited"),
+		StepValueTowards(0.0f, 500.0f, Acceleration, Deceleration, 0.1f),
+		100.0f,
+		SteeringTestTolerance);
+	TestEqual(
+		TEXT("Deceleration is limited"),
+		StepValueTowards(500.0f, 0.0f, Acceleration, Deceleration, 0.1f),
+		300.0f,
+		SteeringTestTolerance);
+
+	// Маленькая разница проходит целиком, без перелёта.
+	TestEqual(
+		TEXT("Small change completes"),
+		StepValueTowards(100.0f, 105.0f, Acceleration, Deceleration, 0.1f),
+		105.0f,
+		SteeringTestTolerance);
+
+	// Два полушага дают тот же результат, что один полный: разгон не зависит
+	// от длительности тика.
+	const float TwoHalfSteps = StepValueTowards(
+		StepValueTowards(0.0f, 500.0f, Acceleration, Deceleration, 0.05f),
+		500.0f,
+		Acceleration,
+		Deceleration,
+		0.05f);
+	TestEqual(
+		TEXT("Acceleration does not depend on the tick length"),
+		TwoHalfSteps,
+		StepValueTowards(0.0f, 500.0f, Acceleration, Deceleration, 0.1f),
+		SteeringTestTolerance);
+
+	// Скорость подхода: sqrt(2 a s). С 200 см и замедлением 400 см/с²
+	// это ровно 400 см/с.
+	TestEqual(
+		TEXT("Arrival speed limit"),
+		GetArrivalSpeedLimit(200.0f, 400.0f),
+		400.0f,
+		SteeringTestTolerance);
+	TestEqual(
+		TEXT("No speed at the target"),
+		GetArrivalSpeedLimit(0.0f, 400.0f),
+		0.0f,
+		SteeringTestTolerance);
+
+	// Торможение к цели: движение по этому правилу останавливается ровно
+	// в цели и не проскакивает её.
+	{
+		constexpr float FullSpeed = 450.0f;
+		constexpr float PathLength = 5000.0f;
+
+		float Distance = PathLength;
+		float Speed = FullSpeed;
+		float TravelledDistance = 0.0f;
+		int32 TickCount = 0;
+
+		while (Distance > 0.0f && TickCount < 10000)
+		{
+			const float DesiredSpeed = FMath::Min(
+				FullSpeed,
+				GetArrivalSpeedLimit(Distance, Deceleration));
+
+			Speed = StepValueTowards(
+				Speed,
+				DesiredSpeed,
+				Acceleration,
+				Deceleration,
+				SteeringTestDeltaTime);
+
+			// Как в Simulation: последний шаг обрезается по остатку пути,
+			// цель не проскакивается.
+			const float StepLength = FMath::Min(Speed * SteeringTestDeltaTime, Distance);
+			TravelledDistance += StepLength;
+			Distance -= StepLength;
+			++TickCount;
+		}
+
+		TestEqual(TEXT("Stops exactly at the target"), Distance, 0.0f, 0.01f);
+		TestEqual(TEXT("Travelled the whole path"), TravelledDistance, PathLength, 0.5f);
+
+		// Путь проходится за время движения на полной скорости плюс
+		// торможение: отряд не тормозит заранее и не ползёт у цели.
+		// Аналитически это (5000 - 450^2 / (2 * 2000)) / 450 + 450 / 2000
+		// = 11.2 с, то есть около 449 тиков по 0.025 с.
+		TestTrue(
+			TEXT("Braking starts near the target, not early"),
+			TickCount > 430 && TickCount < 470);
+	}
+
+	// Векторный вариант: направление сохраняется, длина шага ограничена.
+	const FVector2f Stepped = StepVelocityTowards(
+		FVector2f::ZeroVector,
+		FVector2f(300.0f, 400.0f),
+		Acceleration,
+		Deceleration,
+		0.1f);
+	TestEqual(TEXT("Velocity step size"), Stepped.Size(), 100.0f, SteeringTestTolerance);
+	TestEqual(TEXT("Velocity step direction"), Stepped.X / Stepped.Y, 0.75f, SteeringTestTolerance);
+
+	return true;
+}
+
 #endif

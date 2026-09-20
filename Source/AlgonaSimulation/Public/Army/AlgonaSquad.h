@@ -18,6 +18,15 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	/** Направление «вперёд» на плоскости; ForwardVector, если оно не задано. */
 	FVector GetForwardDirection2D() const;
 
+	/** Ускорение центра Squad, см/с²: полная скорость за AccelerationSeconds. */
+	float GetMoveAcceleration() const;
+
+	/** Замедление центра Squad, см/с². */
+	float GetMoveDeceleration() const;
+
+	/** Угловое ускорение строя, рад/с²: полная угловая скорость за то же время. */
+	float GetYawAcceleration() const;
+
 	/**
 	 * Максимальная скорость поворота строя, рад/с: крайний слот на дуге
 	 * движется не быстрее TurnSpeedFactor * CenterMoveSpeed.
@@ -122,13 +131,23 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	// на месте, скорость движения и поворота Squad растёт от нуля до полной.
 	float MirrorTurnStartRemainingSeconds = 0.0f;
 
-	// Скорость поворота строя за последний тик, рад/с (знак — направление) —
-	// упреждение для L2, как CenterVelocity.
+	// Текущая скорость поворота строя, рад/с (знак — направление). Меняется
+	// с угловым ускорением и служит упреждением для L2, как CenterVelocity.
 	float YawRate = 0.0f;
+
+	// Текущая скорость центра вдоль пути, см/с. Меняется с ускорением.
+	float CenterSpeed = 0.0f;
 
 	// Скорость крайнего слота при повороте относительно заданной скорости
 	// Squad. Меньше UnitSpeedFactor, чтобы у крайних Unit был запас на догон.
 	float TurnSpeedFactor = 1.0f;
+
+	// На ходу скорости центра и вращения складываются. Общая скорость
+	// крайнего слота ограничена MaxSlotSpeedFactor от скорости Squad,
+	// иначе крайние Unit бегут заметно быстрее остальных. Поворот при этом
+	// не медленнее MinTurnRateFactor от максимальной угловой скорости.
+	float MaxSlotSpeedFactor = 1.3f;
+	float MinTurnRateFactor = 0.4f;
 
 	// Длина строки из составного приказа «движение + ширина»; 0 — нет.
 	// Применяется за RowLengthApplyDistanceCm до цели (или сразу, если ближе).
@@ -141,6 +160,23 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	static constexpr double MarchMinDistanceCm = 2000.0;
 	static constexpr double MarchMinRadiusFactor = 2.0;
 
-	// Длительность плавного старта после зеркального разворота, с.
+	// Марш: доля пути, на которой начинается доворот к конечному
+	// направлению. 1.0 — доворот заканчивается ровно в цели, меньше —
+	// Squad доворачивает позже и заканчивает уже на месте.
+	static constexpr double FinalTurnDistanceFactor = 0.8;
+
+	// Длительность плавного старта после зеркального разворота, с. Это не
+	// второй разгон, а потолок скорости, пока Unit разворачиваются на месте.
+	// Позже длительность будет браться из анимации разворота Unit.
 	static constexpr float MirrorTurnStartSeconds = 0.5f;
+
+	// Инерция: за сколько секунд Squad набирает полную скорость движения
+	// и полную скорость поворота. Торможение во столько раз резче разгона
+	// (1 — разгон и торможение одинаковые).
+	static constexpr float AccelerationSeconds = 1.0f;
+	static constexpr float DecelerationFactor = 1.0f;
+
+	// То же для Unit: Unit разгоняется вдвое быстрее Squad, иначе не
+	// догоняет слот.
+	static constexpr float UnitAccelerationSeconds = 0.5f;
 };
