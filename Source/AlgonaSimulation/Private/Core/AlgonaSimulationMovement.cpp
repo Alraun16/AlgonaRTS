@@ -29,6 +29,12 @@ namespace
 		TEXT("1 = unit movement uses worker threads, 0 = single thread. Results are identical."),
 		ECVF_Default);
 
+	TAutoConsoleVariable<int32> CVarAlgonaP2LocalAvoidanceGrid(
+		TEXT("algona.P2.LocalAvoidanceGrid"),
+		1,
+		TEXT("1 = rebuild the L3 neighbour grid every step, 0 = skip it (for measurements)."),
+		ECVF_Default);
+
 	// Минимальная порция Unit на одну задачу SteerUnits: на более мелких
 	// порциях раздача задач потокам стоит дороже самого расчёта.
 	constexpr int32 SteerMinBatchSize = 1024;
@@ -250,6 +256,32 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 			SteerUnit(UnitIndex);
 		}
 	}
+}
+
+void UAlgonaSimulationSubsystem::BuildLocalAvoidanceGrid(bool bParallel)
+{
+	if (CVarAlgonaP2LocalAvoidanceGrid.GetValueOnGameThread() == 0)
+	{
+		return;
+	}
+
+	// Пока в L3 участвуют все Unit. Список пересобирается только при
+	// изменении числа Unit.
+	const int32 UnitCount = UnitState.Positions.Num();
+
+	if (LocalAvoidanceUnitIndices.Num() != UnitCount)
+	{
+		LocalAvoidanceUnitIndices.SetNumUninitialized(UnitCount);
+		for (int32 UnitIndex = 0; UnitIndex < UnitCount; ++UnitIndex)
+		{
+			LocalAvoidanceUnitIndices[UnitIndex] = UnitIndex;
+		}
+	}
+
+	LocalAvoidanceGrid.Rebuild(
+		LocalAvoidanceUnitIndices,
+		UnitState.Positions,
+		bParallel);
 }
 
 int32 UAlgonaSimulationSubsystem::UpdateUnitGrid()

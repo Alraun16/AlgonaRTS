@@ -74,6 +74,14 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	const double SteerEndSeconds =
 		FPlatformTime::Seconds();
 
+	// L3: мелкая сетка соседей по новым позициям. Расталкивание (шаг 12)
+	// встанет сразу после неё и до обновления Unit Grid, потому что тоже
+	// сдвигает Unit.
+	BuildLocalAvoidanceGrid(bParallelMovement);
+
+	const double LocalGridEndSeconds =
+		FPlatformTime::Seconds();
+
 	// Обновление Unit Grid для Unit, сменивших ячейку.
 	const int32 ChangedEntities = UpdateUnitGrid();
 
@@ -96,8 +104,10 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 		(SquadsEndSeconds - CommandsEndSeconds) * 1000.0;
 	Metrics.LastSteerMilliseconds =
 		(SteerEndSeconds - SquadsEndSeconds) * 1000.0;
+	Metrics.LastLocalGridMilliseconds =
+		(LocalGridEndSeconds - SteerEndSeconds) * 1000.0;
 	Metrics.LastUnitGridMilliseconds =
-		(UnitGridEndSeconds - SteerEndSeconds) * 1000.0;
+		(UnitGridEndSeconds - LocalGridEndSeconds) * 1000.0;
 	Metrics.bLastParallelMovement = bParallelMovement;
 	Metrics.LastStepMilliseconds =
 		(FPlatformTime::Seconds() - StepStartSeconds) * 1000.0;

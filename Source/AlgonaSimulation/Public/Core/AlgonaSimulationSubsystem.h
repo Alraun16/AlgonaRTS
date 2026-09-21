@@ -5,6 +5,7 @@
 #include "Army/AlgonaUnitSnapshot.h"
 #include "Army/AlgonaSquad.h"
 #include "Spatial/AlgonaSquadSpatialGrid.h"
+#include "Spatial/AlgonaLocalAvoidanceGrid.h"
 #include "Spatial/AlgonaUnitSpatialGrid.h"
 #include "Spatial/AlgonaSquadSpatialSnapshot.h"
 
@@ -264,6 +265,7 @@ private:
 		double SquadsMillisecondsSum = 0.0;
 		double SteerMillisecondsSum = 0.0;
 		double UnitGridMillisecondsSum = 0.0;
+		double LocalGridMillisecondsSum = 0.0;
 		int64 MovedEntitiesSum = 0;
 	};
 
@@ -345,6 +347,9 @@ private:
 	// Squad меняется на противоположное. false — если таблица неприменима.
 	bool ApplyMirrorTurn(FAlgonaSquad& Squad);
 
+	// L3: перестройка мелкой сетки по позициям Unit после L2.
+	void BuildLocalAvoidanceGrid(bool bParallel);
+
 	// Значение CVar algona.P2.SquadMoveSpeed; 0 — подмены нет.
 	static float GetSquadMoveSpeedOverride();
 
@@ -408,6 +413,11 @@ private:
 	// Состояние Unit (источник истины для движения) и данные Squad текущего тика.
 	FAlgonaUnitStateArrays UnitState;
 	TArray<FAlgonaSquadMovementFrame> SquadMovementFrames;
+
+	// L3: мелкая сетка соседей и список Unit, которые в неё попадают.
+	// Пока это все Unit; на шаге broadphase (14) — только Unit пересекающихся Squad.
+	FAlgonaLocalAvoidanceGrid LocalAvoidanceGrid;
+	TArray<int32> LocalAvoidanceUnitIndices;
 
 	// Состояние стресс-сценария: направление следующего прохода по Y
 	// (+1 или -1) для каждого SquadId.

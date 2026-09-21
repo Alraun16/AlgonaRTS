@@ -34,6 +34,9 @@ struct ALGONASIMULATION_API FAlgonaSimulationMetrics
 	double LastSteerMilliseconds = 0.0;
 	double LastUnitGridMilliseconds = 0.0;
 
+	// L3: перестройка мелкой сетки соседей.
+	double LastLocalGridMilliseconds = 0.0;
+
 	// Конвейер движения последнего шага выполнялся на рабочих потоках.
 	bool bLastParallelMovement = false;
 	double BacklogSeconds = 0.0;

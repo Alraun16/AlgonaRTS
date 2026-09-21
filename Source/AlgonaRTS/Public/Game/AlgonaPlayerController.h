@@ -7,6 +7,7 @@
 
 class AAlgonaRTSCameraActor;
 class AAlgonaSelectionPresentationActor;
+struct FAlgonaSquad;
 
 /** Точка, куда идёт выбранный Squad: центр цели и размер отметки. */
 struct FAlgonaOrderTargetMarker
@@ -14,7 +15,6 @@ struct FAlgonaOrderTargetMarker
 	FVector Location = FVector::ZeroVector;
 	double Radius = 0.0;
 };
-struct FAlgonaSquad;
 
 /**
  * Owns local player input for RTS controls.
