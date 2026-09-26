@@ -222,3 +222,90 @@ void MirrorAlgonaFormationLayout(
 	Layout.Slots = MoveTemp(OrderedSlots);
 	Layout.FrontRowLocalX = FrontRowLocalX;
 }
+
+void BuildAlgonaSlotAssignmentByPosition(
+	const FAlgonaFormationLayout& Layout,
+	TConstArrayView<FVector2f> UnitLocalPositions,
+	TArray<int32>& OutSlotForUnit)
+{
+	const int32 UnitCount = UnitLocalPositions.Num();
+	OutSlotForUnit.Init(INDEX_NONE, UnitCount);
+
+	if (UnitCount == 0 || Layout.Slots.Num() != UnitCount)
+	{
+		return;
+	}
+
+	// 1. Unit по глубине: передние первыми. Одинаковая глубина — слева
+	// направо, дальше по номеру: результат не зависит от порядка обхода.
+	TArray<int32> UnitOrder;
+	UnitOrder.Reserve(UnitCount);
+	for (int32 UnitOrderIndex = 0; UnitOrderIndex < UnitCount; ++UnitOrderIndex)
+	{
+		UnitOrder.Add(UnitOrderIndex);
+	}
+
+	UnitOrder.Sort([&UnitLocalPositions](int32 A, int32 B)
+	{
+		const FVector2f& PositionA = UnitLocalPositions[A];
+		const FVector2f& PositionB = UnitLocalPositions[B];
+
+		if (PositionA.X != PositionB.X)
+		{
+			return PositionA.X > PositionB.X;
+		}
+		return PositionA.Y != PositionB.Y ? PositionA.Y < PositionB.Y : A < B;
+	});
+
+	// 2. Слоты по рядам: ряды спереди назад, внутри ряда слева направо.
+	TArray<int32> SlotOrder;
+	SlotOrder.Reserve(UnitCount);
+	for (int32 SlotIndex = 0; SlotIndex < UnitCount; ++SlotIndex)
+	{
+		SlotOrder.Add(SlotIndex);
+	}
+
+	SlotOrder.Sort([&Layout](int32 A, int32 B)
+	{
+		const FAlgonaFormationSlot& SlotA = Layout.Slots[A];
+		const FAlgonaFormationSlot& SlotB = Layout.Slots[B];
+
+		if (SlotA.RowIndex != SlotB.RowIndex)
+		{
+			return SlotA.RowIndex < SlotB.RowIndex;
+		}
+		return SlotA.LocalOffset.Y != SlotB.LocalOffset.Y
+			? SlotA.LocalOffset.Y < SlotB.LocalOffset.Y
+			: A < B;
+	});
+
+	// 3. Ряд за рядом: сколько слотов в ряду, столько передних Unit он и
+	// забирает. Внутри ряда Unit пересортировываются слева направо, чтобы
+	// левый достался левому слоту.
+	int32 RowStart = 0;
+
+	while (RowStart < UnitCount)
+	{
+		const int32 RowIndex = Layout.Slots[SlotOrder[RowStart]].RowIndex;
+		int32 RowEnd = RowStart;
+		while (RowEnd < UnitCount && Layout.Slots[SlotOrder[RowEnd]].RowIndex == RowIndex)
+		{
+			++RowEnd;
+		}
+
+		TArrayView<int32> RowUnits(UnitOrder.GetData() + RowStart, RowEnd - RowStart);
+		RowUnits.Sort([&UnitLocalPositions](int32 A, int32 B)
+		{
+			const float LateralA = UnitLocalPositions[A].Y;
+			const float LateralB = UnitLocalPositions[B].Y;
+			return LateralA != LateralB ? LateralA < LateralB : A < B;
+		});
+
+		for (int32 Index = RowStart; Index < RowEnd; ++Index)
+		{
+			OutSlotForUnit[UnitOrder[Index]] = SlotOrder[Index];
+		}
+
+		RowStart = RowEnd;
+	}
+}

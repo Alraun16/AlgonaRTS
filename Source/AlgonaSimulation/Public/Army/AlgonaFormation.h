@@ -84,6 +84,21 @@ ALGONASIMULATION_API void BuildAlgonaFormationLayout(
 	FAlgonaFormationLayout& OutLayout);
 
 /**
+ * Назначает Unit по слотам так, чтобы никто не бежал через весь строй.
+ * UnitLocalPositions — положения Unit в системе координат Squad (X вперёд,
+ * Y вправо), по порядку состава; OutSlotForUnit[Порядок] — номер слота.
+ *
+ * Правило: Unit сортируются по глубине, передний ряд забирает столько Unit,
+ * сколько в нём слотов, следующий — своих, и так до конца; внутри ряда Unit
+ * сортируются слева направо и так же раскладываются по слотам ряда. Взаимное
+ * расположение сохраняется: кто был слева впереди, там и останется.
+ */
+ALGONASIMULATION_API void BuildAlgonaSlotAssignmentByPosition(
+	const FAlgonaFormationLayout& Layout,
+	TConstArrayView<FVector2f> UnitLocalPositions,
+	TArray<int32>& OutSlotForUnit);
+
+/**
  * Отражает раскладку для разворота Squad на 180°: у всех слотов меняется
  * знак смещения, поэтому их положения в мире не меняются и Unit остаются
  * на местах. Номера слотов приводятся к обычному порядку (строки спереди

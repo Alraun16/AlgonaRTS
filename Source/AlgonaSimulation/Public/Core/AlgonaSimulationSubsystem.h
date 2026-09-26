@@ -351,6 +351,10 @@ private:
 		int32 RowLength);
 	void ApplyMoveGroupCommand(const FAlgonaSquadCommand& Command);
 
+	// Переназначение Unit по слотам после Reform: каждый занимает ближайший
+	// подходящий слот, чтобы никто не бежал через весь строй.
+	void ReassignSquadSlotsByPosition(FAlgonaSquad& Squad);
+
 	// Разворот больше 90°: Unit переходят в зеркальные слоты, направление
 	// Squad меняется на противоположное. false — если таблица неприменима.
 	bool ApplyMirrorTurn(FAlgonaSquad& Squad);

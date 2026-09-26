@@ -162,9 +162,12 @@ void UAlgonaSimulationSubsystem::ProcessPendingCommands()
 			break;
 
 		case EAlgonaSquadCommandType::SetRowLength:
-			// Меняются только позиции слотов, назначение Unit по слотам то же,
-			// поэтому состояние Unit обновлять не нужно.
-			Squad.ApplyRowLengthOrder(Command.RowLength);
+			// Раскладка изменилась — Unit переназначаются по ближайшим слотам,
+			// иначе кто-то побежал бы через весь строй.
+			if (Squad.ApplyRowLengthOrder(Command.RowLength))
+			{
+				ReassignSquadSlotsByPosition(Squad);
+			}
 			break;
 
 		case EAlgonaSquadCommandType::MoveGroup:
@@ -366,6 +369,53 @@ void UAlgonaSimulationSubsystem::ApplyMoveGroupCommand(
 	}
 }
 
+void UAlgonaSimulationSubsystem::ReassignSquadSlotsByPosition(FAlgonaSquad& Squad)
+{
+	const int32 MemberCount = Squad.ActiveUnitIds.Num();
+	if (MemberCount == 0 || Squad.FormationLayout.Slots.Num() != MemberCount)
+	{
+		return;
+	}
+
+	// Положения Unit в системе координат Squad: X вперёд, Y вправо.
+	const FVector Forward = Squad.GetForwardDirection2D();
+	const FVector Right = FVector::CrossProduct(FVector::UpVector, Forward).GetSafeNormal();
+
+	TArray<FVector2f> LocalPositions;
+	LocalPositions.Reserve(MemberCount);
+
+	for (const uint32 UnitId : Squad.ActiveUnitIds)
+	{
+		const FVector Offset =
+			UnitState.Positions[static_cast<int32>(UnitId) - 1] - Squad.CenterLocation;
+
+		LocalPositions.Emplace(
+			static_cast<float>(FVector::DotProduct(Offset, Forward)),
+			static_cast<float>(FVector::DotProduct(Offset, Right)));
+	}
+
+	TArray<int32> SlotForUnit;
+	BuildAlgonaSlotAssignmentByPosition(Squad.FormationLayout, LocalPositions, SlotForUnit);
+
+	TArray<uint32> ReassignedUnitIds;
+	ReassignedUnitIds.SetNumUninitialized(MemberCount);
+
+	for (int32 UnitOrderIndex = 0; UnitOrderIndex < MemberCount; ++UnitOrderIndex)
+	{
+		const int32 SlotIndex = SlotForUnit[UnitOrderIndex];
+		if (!ReassignedUnitIds.IsValidIndex(SlotIndex))
+		{
+			return;
+		}
+
+		const uint32 UnitId = Squad.ActiveUnitIds[UnitOrderIndex];
+		ReassignedUnitIds[SlotIndex] = UnitId;
+		UnitState.SlotIndices[static_cast<int32>(UnitId) - 1] = SlotIndex;
+	}
+
+	Squad.ActiveUnitIds = MoveTemp(ReassignedUnitIds);
+}
+
 bool UAlgonaSimulationSubsystem::ApplyMirrorTurn(FAlgonaSquad& Squad)
 {
 	const int32 SlotCount = Squad.ActiveUnitIds.Num();
@@ -457,7 +507,10 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 			&& Squad.PendingRowLength > 0
 			&& DistanceToTarget <= FAlgonaSquad::RowLengthApplyDistanceCm)
 		{
-			Squad.ApplyRowLengthOrder(Squad.PendingRowLength);
+			if (Squad.ApplyRowLengthOrder(Squad.PendingRowLength))
+			{
+				ReassignSquadSlotsByPosition(Squad);
+			}
 			Squad.PendingRowLength = 0;
 		}
 

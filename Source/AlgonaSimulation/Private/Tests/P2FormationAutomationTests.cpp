@@ -263,4 +263,86 @@ bool FAlgonaP2FormationMirrorLayoutTest::RunTest(
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAlgonaP2FormationSlotAssignmentTest,
+	"Algona.P2.Formation.SlotAssignment",
+	EAutomationTestFlags_ApplicationContextMask
+		| EAutomationTestFlags::SmokeFilter);
+
+bool FAlgonaP2FormationSlotAssignmentTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+
+	FAlgonaFormationParams WideParams;
+	WideParams.RowLength = 10;
+
+	FAlgonaFormationParams NarrowParams;
+	NarrowParams.RowLength = 5;
+
+	// Unit стоят в широком строю, а раскладка стала узкой: каждый должен
+	// получить слот рядом, а не на другом краю.
+	FAlgonaFormationLayout WideLayout;
+	BuildAlgonaFormationLayout(WideParams, 20, WideLayout);
+
+	FAlgonaFormationLayout NarrowLayout;
+	BuildAlgonaFormationLayout(NarrowParams, 20, NarrowLayout);
+
+	TArray<FVector2f> LocalPositions;
+	for (const FAlgonaFormationSlot& Slot : WideLayout.Slots)
+	{
+		LocalPositions.Add(Slot.LocalOffset);
+	}
+
+	TArray<int32> SlotForUnit;
+	BuildAlgonaSlotAssignmentByPosition(NarrowLayout, LocalPositions, SlotForUnit);
+
+	TestEqual(TEXT("Assignment size"), SlotForUnit.Num(), LocalPositions.Num());
+
+	TArray<int32> UseCount;
+	UseCount.Init(0, NarrowLayout.Slots.Num());
+
+	for (const int32 SlotIndex : SlotForUnit)
+	{
+		if (!TestTrue(TEXT("Slot is valid"), UseCount.IsValidIndex(SlotIndex)))
+		{
+			return false;
+		}
+		++UseCount[SlotIndex];
+	}
+
+	for (const int32 Count : UseCount)
+	{
+		TestEqual(TEXT("Each slot is used once"), Count, 1);
+	}
+
+	// Взаимное расположение сохраняется: Unit левее — слот не правее,
+	// Unit впереди — ряд не дальше.
+	for (int32 First = 0; First < LocalPositions.Num(); ++First)
+	{
+		for (int32 Second = 0; Second < LocalPositions.Num(); ++Second)
+		{
+			const FAlgonaFormationSlot& FirstSlot = NarrowLayout.Slots[SlotForUnit[First]];
+			const FAlgonaFormationSlot& SecondSlot = NarrowLayout.Slots[SlotForUnit[Second]];
+
+			if (LocalPositions[First].X > LocalPositions[Second].X)
+			{
+				TestTrue(
+					TEXT("Front units keep front rows"),
+					FirstSlot.RowIndex <= SecondSlot.RowIndex);
+			}
+
+			if (FirstSlot.RowIndex == SecondSlot.RowIndex
+				&& LocalPositions[First].Y < LocalPositions[Second].Y)
+			{
+				TestTrue(
+					TEXT("Left units keep left slots in a row"),
+					FirstSlot.LocalOffset.Y < SecondSlot.LocalOffset.Y);
+			}
+		}
+	}
+
+	return true;
+}
+
 #endif
