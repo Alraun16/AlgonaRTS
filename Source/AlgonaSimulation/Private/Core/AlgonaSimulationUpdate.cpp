@@ -18,6 +18,11 @@ namespace
 	// Направления совпадают, если угол между ними меньше, рад.
 	constexpr double TurnToleranceRadians = 1.0e-4;
 
+	// Скорость изменения множителя тесноты Squad, доля в секунду: строй
+	// сбавляет ход за ~1 с, а восстанавливает его за ~2 с.
+	constexpr float CongestionSlowRate = 1.0f;
+	constexpr float CongestionRecoverRate = 0.5f;
+
 	// Угол поворота от From к To на плоскости со знаком, рад, в [-pi, pi].
 	double GetSignedYawDelta(const FVector& From, const FVector& To)
 	{
@@ -64,22 +69,29 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	const double SquadsEndSeconds =
 		FPlatformTime::Seconds();
 
-	// Стадии 3-4: движение Unit (AlgonaSimulationMovement.cpp).
+	// Стадии 3-6: движение Unit (AlgonaSimulationMovement.cpp).
 	// Режим читается один раз, чтобы весь шаг шёл в одном режиме.
 	const bool bParallelMovement = IsParallelMovementEnabled();
 
-	// L2: желаемая скорость, новая позиция и поворот каждого Unit.
+	// L3: сетка соседей по позициям на начало тика — по ней Unit
+	// заранее обходят друг друга.
+	BuildLocalAvoidanceGrid(bParallelMovement);
+
+	const double LocalGridEndSeconds =
+		FPlatformTime::Seconds();
+
+	// L2 + обход: намерение Unit, инерция, новая позиция и поворот.
 	SteerUnits(DeltaTime, bParallelMovement);
 
 	const double SteerEndSeconds =
 		FPlatformTime::Seconds();
 
-	// L3: мелкая сетка соседей по новым позициям. Расталкивание (шаг 12)
-	// встанет сразу после неё и до обновления Unit Grid, потому что тоже
-	// сдвигает Unit.
-	BuildLocalAvoidanceGrid(bParallelMovement);
+	// L3: контакт — расталкивание реально перекрывшихся Unit, затем
+	// теснота Squad для замедления строя в следующем тике.
+	SeparateUnits(DeltaTime, bParallelMovement);
+	UpdateSquadCongestion();
 
-	const double LocalGridEndSeconds =
+	const double SeparationEndSeconds =
 		FPlatformTime::Seconds();
 
 	// Обновление Unit Grid для Unit, сменивших ячейку.
@@ -102,12 +114,14 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 		(CommandsEndSeconds - StepStartSeconds) * 1000.0;
 	Metrics.LastSquadsMilliseconds =
 		(SquadsEndSeconds - CommandsEndSeconds) * 1000.0;
-	Metrics.LastSteerMilliseconds =
-		(SteerEndSeconds - SquadsEndSeconds) * 1000.0;
 	Metrics.LastLocalGridMilliseconds =
-		(LocalGridEndSeconds - SteerEndSeconds) * 1000.0;
+		(LocalGridEndSeconds - SquadsEndSeconds) * 1000.0;
+	Metrics.LastSteerMilliseconds =
+		(SteerEndSeconds - LocalGridEndSeconds) * 1000.0;
+	Metrics.LastSeparationMilliseconds =
+		(SeparationEndSeconds - SteerEndSeconds) * 1000.0;
 	Metrics.LastUnitGridMilliseconds =
-		(UnitGridEndSeconds - LocalGridEndSeconds) * 1000.0;
+		(UnitGridEndSeconds - SeparationEndSeconds) * 1000.0;
 	Metrics.bLastParallelMovement = bParallelMovement;
 	Metrics.LastStepMilliseconds =
 		(FPlatformTime::Seconds() - StepStartSeconds) * 1000.0;
@@ -394,6 +408,7 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 	// Отладочная подмена скорости всех Squad: удобно подбирать скорость,
 	// не пересобирая проект.
 	const float SquadMoveSpeedOverride = GetSquadMoveSpeedOverride();
+	const float CongestionSlowdown = FMath::Clamp(GetSquadCongestionSlowdown(), 0.0f, 1.0f);
 
 	for (FAlgonaSquad& Squad : Squads)
 	{
@@ -563,6 +578,16 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 			}
 		}
 
+		// Теснота: если Unit Squad тормозят и обходят соседей, строй сбавляет
+		// ход и не вдавливает их в толпу. Множитель меняется плавно:
+		// замедляется быстрее, чем восстанавливается.
+		Squad.CongestionSpeedScale = AlgonaUnitSteering::StepValueTowards(
+			Squad.CongestionSpeedScale,
+			1.0f - Squad.Congestion * CongestionSlowdown,
+			CongestionRecoverRate,
+			CongestionSlowRate,
+			DeltaTime);
+
 		// 4. Движение центра по прямой к цели с разгоном и торможением.
 		// Желаемая скорость ограничена торможением к цели, поэтому центр
 		// встаёт ровно в цели, а не проскакивает её.
@@ -571,7 +596,7 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 
 		const double DesiredSpeed = bNeedsMove
 			? FMath::Min3(
-				static_cast<double>(Squad.CenterMoveSpeed),
+				static_cast<double>(Squad.CenterMoveSpeed * Squad.CongestionSpeedScale),
 				static_cast<double>(Squad.CenterMoveSpeed) * StartSpeedScale,
 				static_cast<double>(AlgonaUnitSteering::GetArrivalSpeedLimit(
 					static_cast<float>(DistanceToTarget),

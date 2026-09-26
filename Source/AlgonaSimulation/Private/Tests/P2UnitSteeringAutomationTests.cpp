@@ -227,4 +227,63 @@ bool FAlgonaP2UnitSteeringInertiaTest::RunTest(
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAlgonaP2SteeringSoftSlotAndCollisionTimeTest,
+	"Algona.P2.Steering.SoftSlotAndCollisionTime",
+	EAutomationTestFlags_ApplicationContextMask
+		| EAutomationTestFlags::SmokeFilter);
+
+bool FAlgonaP2SteeringSoftSlotAndCollisionTimeTest::RunTest(
+	const FString& Parameters)
+{
+	(void)Parameters;
+
+	using namespace AlgonaUnitSteering;
+
+	// Мягкий слот: внутри мёртвой зоны (30 см) Unit не подравнивается.
+	FVector2f Velocity = ComputeDesiredVelocity(
+		FVector2f(0.0f, 20.0f), FVector2f::ZeroVector,
+		SteeringTestMaxSpeed, SteeringTestDeltaTime, 30.0f, 0.8f);
+	TestEqual(TEXT("Soft slot: no correction inside the dead zone"), Velocity.Size(), 0.0f, SteeringTestTolerance);
+
+	// Отклонение 130 см: подравнивается 100 см сверх зоны, не быстрее
+	// 100 / 0.8 = 125 см/с.
+	Velocity = ComputeDesiredVelocity(
+		FVector2f(0.0f, 130.0f), FVector2f::ZeroVector,
+		SteeringTestMaxSpeed, SteeringTestDeltaTime, 30.0f, 0.8f);
+	TestEqual(TEXT("Soft slot: slow return"), Velocity.Y, 125.0f, SteeringTestTolerance);
+	TestEqual(TEXT("Soft slot: return towards the slot"), Velocity.X, 0.0f, SteeringTestTolerance);
+
+	// Встречные: сосед в 300 см впереди, сближение 600 см/с, контакт 70 см —
+	// (300 - 70) / 600 = 0.3833 с.
+	TestEqual(
+		TEXT("Head-on: time to collision"),
+		ComputeTimeToCollision(FVector2f(300.0f, 0.0f), FVector2f(600.0f, 0.0f), 70.0f),
+		0.38333f,
+		0.0001f);
+
+	// Пройдут мимо на 100 см — столкновения нет.
+	TestEqual(
+		TEXT("Passing by: no collision"),
+		ComputeTimeToCollision(FVector2f(300.0f, 100.0f), FVector2f(600.0f, 0.0f), 70.0f),
+		-1.0f,
+		SteeringTestTolerance);
+
+	// Расходятся — столкновения нет.
+	TestEqual(
+		TEXT("Moving apart: no collision"),
+		ComputeTimeToCollision(FVector2f(300.0f, 0.0f), FVector2f(-600.0f, 0.0f), 70.0f),
+		-1.0f,
+		SteeringTestTolerance);
+
+	// Уже перекрываются — время ноль.
+	TestEqual(
+		TEXT("Overlapping: zero time"),
+		ComputeTimeToCollision(FVector2f(50.0f, 0.0f), FVector2f(600.0f, 0.0f), 70.0f),
+		0.0f,
+		SteeringTestTolerance);
+
+	return true;
+}
+
 #endif

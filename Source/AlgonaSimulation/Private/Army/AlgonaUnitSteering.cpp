@@ -4,7 +4,9 @@ FVector2f AlgonaUnitSteering::ComputeDesiredVelocity(
 	const FVector2f& ToSlotAtTickStart,
 	const FVector2f& SlotVelocity,
 	float MaxSpeed,
-	float DeltaTime)
+	float DeltaTime,
+	float SlotDeadZone,
+	float SlotReturnTime)
 {
 	if (MaxSpeed <= 0.0f || DeltaTime <= 0.0f)
 	{
@@ -14,17 +16,28 @@ FVector2f AlgonaUnitSteering::ComputeDesiredVelocity(
 	FVector2f Correction = FVector2f::ZeroVector;
 	const float Distance = ToSlotAtTickStart.Size();
 
-	if (Distance > UE_KINDA_SMALL_NUMBER)
+	// Мягкий слот: подравнивается только отклонение сверх мёртвой зоны.
+	const float CorrectionDistance = Distance - FMath::Max(SlotDeadZone, 0.0f);
+
+	if (Distance > UE_KINDA_SMALL_NUMBER && CorrectionDistance > 0.0f)
 	{
-		// Скорость поправки ограничена тремя условиями:
+		// Скорость поправки ограничена условиями:
 		// - не больше максимальной скорости Unit;
 		// - не больше скорости, с которой Unit успеет остановиться у слота
 		//   с замедлением ArrivalDeceleration;
-		// - не больше, чем нужно, чтобы дойти до слота ровно за один тик.
-		const float CorrectionSpeed = FMath::Min3(
+		// - не больше, чем нужно, чтобы дойти до слота ровно за один тик;
+		// - мягкий слот: не быстрее, чем «отклонение / SlotReturnTime».
+		float CorrectionSpeed = FMath::Min3(
 			MaxSpeed,
-			FMath::Sqrt(2.0f * ArrivalDeceleration * Distance),
-			Distance / DeltaTime);
+			FMath::Sqrt(2.0f * ArrivalDeceleration * CorrectionDistance),
+			CorrectionDistance / DeltaTime);
+
+		if (SlotReturnTime > 0.0f)
+		{
+			CorrectionSpeed = FMath::Min(
+				CorrectionSpeed,
+				CorrectionDistance / SlotReturnTime);
+		}
 
 		Correction = ToSlotAtTickStart * (CorrectionSpeed / Distance);
 	}
@@ -119,4 +132,34 @@ float AlgonaUnitSteering::GetArrivalSpeedLimit(
 	return Distance > 0.0f && Deceleration > 0.0f
 		? FMath::Sqrt(2.0f * Deceleration * Distance)
 		: 0.0f;
+}
+
+float AlgonaUnitSteering::ComputeTimeToCollision(
+	const FVector2f& RelativePosition,
+	const FVector2f& ClosingVelocity,
+	float CollisionDistance)
+{
+	// Расстояние через время t: |P - V t|. Ищем наименьшее t, при котором
+	// оно равно CollisionDistance: квадратное уравнение
+	// (V·V) t² - 2 (P·V) t + (P·P - R²) = 0.
+	const float C = RelativePosition.SizeSquared() - FMath::Square(CollisionDistance);
+	if (C <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	const float B = FVector2f::DotProduct(RelativePosition, ClosingVelocity);
+	if (B <= 0.0f)
+	{
+		return -1.0f;
+	}
+
+	const float A = ClosingVelocity.SizeSquared();
+	const float Discriminant = B * B - A * C;
+	if (A <= UE_SMALL_NUMBER || Discriminant < 0.0f)
+	{
+		return -1.0f;
+	}
+
+	return (B - FMath::Sqrt(Discriminant)) / A;
 }

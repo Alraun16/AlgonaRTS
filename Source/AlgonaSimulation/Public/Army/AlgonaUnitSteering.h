@@ -27,12 +27,29 @@ namespace AlgonaUnitSteering
 	 * Желаемая скорость Unit на плоскости: скорость слота (упреждение) плюс
 	 * поправка к слоту, не больше MaxSpeed.
 	 * ToSlotAtTickStart — вектор от Unit до положения слота в начале тика.
+	 *
+	 * Мягкий слот: внутри SlotDeadZone (см) Unit не подравнивается, а дальше
+	 * возвращается не быстрее, чем «отклонение / SlotReturnTime» — по пологой
+	 * дуге, а не рывком. Нули — жёсткий слот.
 	 */
 	ALGONASIMULATION_API FVector2f ComputeDesiredVelocity(
 		const FVector2f& ToSlotAtTickStart,
 		const FVector2f& SlotVelocity,
 		float MaxSpeed,
-		float DeltaTime);
+		float DeltaTime,
+		float SlotDeadZone = 0.0f,
+		float SlotReturnTime = 0.0f);
+
+	/**
+	 * Через сколько секунд два Unit сблизятся до CollisionDistance, если оба
+	 * сохранят скорость. RelativePosition — от меня к соседу, ClosingVelocity —
+	 * моя скорость минус скорость соседа. 0 — уже ближе CollisionDistance,
+	 * -1 — не сблизятся (расходятся или пройдут мимо).
+	 */
+	ALGONASIMULATION_API float ComputeTimeToCollision(
+		const FVector2f& RelativePosition,
+		const FVector2f& ClosingVelocity,
+		float CollisionDistance);
 
 	/**
 	 * Ограничение ускорения: приближает текущую скорость к желаемой не

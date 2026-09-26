@@ -154,6 +154,13 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	// Текущая скорость центра вдоль пути, см/с. Меняется с ускорением.
 	float CenterSpeed = 0.0f;
 
+	// Теснота Squad (0..1): насколько его Unit тормозят и обходят соседей.
+	// Считается после движения Unit, используется L1 в следующем тике.
+	float Congestion = 0.0f;
+
+	// Множитель скорости Squad от тесноты; меняется плавно, а не рывком.
+	float CongestionSpeedScale = 1.0f;
+
 	// Скорость крайнего слота при повороте относительно заданной скорости
 	// Squad. Меньше UnitSpeedFactor, чтобы у крайних Unit был запас на догон.
 	float TurnSpeedFactor = 1.0f;

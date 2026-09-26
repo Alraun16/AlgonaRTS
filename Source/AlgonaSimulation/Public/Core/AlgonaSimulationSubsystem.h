@@ -266,6 +266,7 @@ private:
 		double SteerMillisecondsSum = 0.0;
 		double UnitGridMillisecondsSum = 0.0;
 		double LocalGridMillisecondsSum = 0.0;
+		double SeparationMillisecondsSum = 0.0;
 		int64 MovedEntitiesSum = 0;
 	};
 
@@ -287,6 +288,31 @@ private:
 		// фактической скоростью появится ограничение ускорения.
 		TArray<FVector2f> DesiredVelocities;
 
+		// Новая скорость Unit, рассчитанная в первом проходе SteerUnits.
+		// Отдельный массив нужен, чтобы соседи в этом проходе читали скорость
+		// на начало тика (схема Якоби).
+		TArray<FVector2f> NextVelocities;
+
+		// Теснота Unit за этот тик — доля торможения из-за соседей (0 —
+		// свободно, до AvoidanceMaxBrake). Из неё считается теснота Squad.
+		TArray<float> Crowding;
+
+		// 1 — Unit заметно уклоняется и должен смотреть по ходу, а не идти боком.
+		TArray<uint8> AvoidanceFacingFlags;
+
+		// L3: скорость расталкивания за этот тик. Добавляется к движению
+		// поверх инерции: толчок действует сразу, а не разгоняется.
+		TArray<FVector2f> SeparationVelocities;
+
+		// Глубина касания за этот тик (0 — свободно, 1 — Unit в одной точке).
+		// Из неё считаются трение и вклад контакта в тесноту Squad.
+		TArray<float> ContactDepths;
+
+		// Уклонение и торможение прошлого тика: новое решение смешивается
+		// с ними, чтобы реакция на соседей не дёргалась от тика к тику.
+		TArray<FVector2f> DodgeVelocities;
+		TArray<float> AvoidanceBrakes;
+
 		// 1 — позиция или поворот изменились в этом тике.
 		TArray<uint8> ChangedFlags;
 
@@ -303,6 +329,7 @@ private:
 		float YawRate = 0.0f;
 		float FacingYaw = 0.0f;
 		float UnitAcceleration = 0.0f;
+		float UnitRadius = 0.0f;
 		bool bUnitsFaceMovement = false;
 		float UnitMaxSpeed = 0.0f;
 	};
@@ -349,6 +376,15 @@ private:
 
 	// L3: перестройка мелкой сетки по позициям Unit после L2.
 	void BuildLocalAvoidanceGrid(bool bParallel);
+
+	// L3: расталкивание реально перекрывшихся Unit (контакт).
+	void SeparateUnits(float DeltaTime, bool bParallel);
+
+	// Теснота Squad по тесноте его Unit — для замедления строя в L1.
+	void UpdateSquadCongestion();
+
+	// Значение CVar algona.P2.SquadCongestionSlowdown.
+	static float GetSquadCongestionSlowdown();
 
 	// Значение CVar algona.P2.SquadMoveSpeed; 0 — подмены нет.
 	static float GetSquadMoveSpeedOverride();

@@ -43,13 +43,19 @@ public:
 		bool bParallel);
 
 	/**
-	 * Вызывает Visitor(UnitIndex) для каждого Unit в клетке Location и восьми
-	 * клетках вокруг. Корзина, в которую попали две из девяти клеток,
-	 * обходится один раз. Среди кандидатов могут быть далёкие Unit из
-	 * совпавших корзин и сам Unit — расстояние проверяет вызывающий код.
+	 * Вызывает Visitor(UnitIndex) для каждого Unit в квадрате клеток
+	 * (2 * Rings + 1)² вокруг Location: Rings = 1 — 3×3 (гарантированно видны
+	 * все в 150 см), Rings = 2 — 5×5 (в 300 см). Среди кандидатов бывают
+	 * далёкие Unit из совпавших корзин тора и сам Unit — расстояние проверяет
+	 * вызывающий код.
+	 *
+	 * Клетки одной строки квадрата — соседние корзины, поэтому строка
+	 * обходится одним сплошным куском Entries (или двумя, если переходит
+	 * через край тора). Тор не меньше 32 × 32 корзин, так что клетки
+	 * квадрата никогда не совпадают друг с другом.
 	 */
 	template <typename FunctorType>
-	void ForEachCandidate(const FVector& Location, FunctorType&& Visitor) const
+	void ForEachCandidate(const FVector& Location, int32 Rings, FunctorType&& Visitor) const
 	{
 		if (Entries.IsEmpty())
 		{
@@ -58,36 +64,36 @@ public:
 
 		const int32 CenterCellX = GetCellCoordinate(Location.X);
 		const int32 CenterCellY = GetCellCoordinate(Location.Y);
+		const uint32 RowCellCount = static_cast<uint32>(2 * Rings + 1);
+		const uint32 FirstColumn = static_cast<uint32>(CenterCellX - Rings) & BucketsXMask;
 
-		uint32 VisitedBuckets[9];
-		int32 VisitedCount = 0;
+		const int32* StartData = BucketStarts.GetData();
+		const int32* EntryData = Entries.GetData();
 
-		for (int32 OffsetY = -1; OffsetY <= 1; ++OffsetY)
+		auto VisitBucketRange = [StartData, EntryData, &Visitor](uint32 FirstBucket, uint32 BucketCount)
 		{
-			for (int32 OffsetX = -1; OffsetX <= 1; ++OffsetX)
+			const int32 End = StartData[FirstBucket + BucketCount];
+			for (int32 EntryIndex = StartData[FirstBucket]; EntryIndex < End; ++EntryIndex)
 			{
-				const uint32 Bucket = GetBucketIndex(
-					CenterCellX + OffsetX,
-					CenterCellY + OffsetY);
+				Visitor(EntryData[EntryIndex]);
+			}
+		};
 
-				bool bAlreadyVisited = false;
-				for (int32 Index = 0; Index < VisitedCount; ++Index)
-				{
-					bAlreadyVisited |= VisitedBuckets[Index] == Bucket;
-				}
+		for (int32 OffsetY = -Rings; OffsetY <= Rings; ++OffsetY)
+		{
+			const uint32 RowStart =
+				(static_cast<uint32>(CenterCellY + OffsetY) & BucketsYMask) << BucketsXBits;
 
-				if (bAlreadyVisited)
-				{
-					continue;
-				}
-
-				VisitedBuckets[VisitedCount++] = Bucket;
-
-				const int32 End = BucketStarts[Bucket + 1];
-				for (int32 EntryIndex = BucketStarts[Bucket]; EntryIndex < End; ++EntryIndex)
-				{
-					Visitor(Entries[EntryIndex]);
-				}
+			if (FirstColumn + RowCellCount - 1 <= BucketsXMask)
+			{
+				VisitBucketRange(RowStart + FirstColumn, RowCellCount);
+			}
+			else
+			{
+				// Строка переходит через край тора: два куска.
+				const uint32 FirstPart = BucketsXMask + 1 - FirstColumn;
+				VisitBucketRange(RowStart + FirstColumn, FirstPart);
+				VisitBucketRange(RowStart, RowCellCount - FirstPart);
 			}
 		}
 	}
