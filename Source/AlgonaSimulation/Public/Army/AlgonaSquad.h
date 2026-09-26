@@ -119,14 +119,15 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	// есть CVar algona.P2.SquadMoveSpeed.
 	float CenterMoveSpeed = 450.0f;
 
-	// Максимальная скорость Unit = CenterMoveSpeed * UnitSpeedFactor:
-	// запас скорости на догон строя и перестроение.
-	float UnitSpeedFactor = 1.3f;
+	// Максимальная скорость Unit = CenterMoveSpeed * UnitSpeedFactor.
+	// Запас на догон строя небольшой: отставший догоняет, когда Squad сам
+	// сбавляет ход в давке, а не улетает вперёд.
+	float UnitSpeedFactor = 1.02f;
 
-	// То же, пока строй поворачивается. На ходу крайний слот при повороте
-	// движется быстрее Squad (скорость центра + скорость от вращения),
-	// поэтому Unit нужен больший запас.
-	float TurningUnitSpeedFactor = 1.5f;
+	// То же, пока строй поворачивается. Держится равным обычному: бюджет
+	// крайнего слота (MaxSlotSpeedFactor) не выпускает слот за скорость Squad,
+	// поэтому отдельный запас на поворот больше не нужен.
+	float TurningUnitSpeedFactor = 1.02f;
 
 	bool bHasMoveTarget = false;
 
@@ -154,6 +155,17 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	// Текущая скорость центра вдоль пути, см/с. Меняется с ускорением.
 	float CenterSpeed = 0.0f;
 
+	// Фактические границы Squad — прямоугольник, реально занятый его Unit.
+	// Считаются после движения, используются отбором участников L3.
+	FVector2f UnitBoundsMin = FVector2f::ZeroVector;
+	FVector2f UnitBoundsMax = FVector2f::ZeroVector;
+
+	// Сколько тиков Squad ещё считается перестраивающимся: после Reform и во
+	// время поворота Unit могут пройти друг сквозь друга, поэтому L3 нужен
+	// даже одинокому Squad.
+	int32 LocalAvoidanceHoldTicks = 0;
+	uint32 LocalAvoidanceFormationRevision = TNumericLimits<uint32>::Max();
+
 	// Теснота Squad (0..1): насколько его Unit тормозят и обходят соседей.
 	// Считается после движения Unit, используется L1 в следующем тике.
 	float Congestion = 0.0f;
@@ -166,10 +178,11 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	float TurnSpeedFactor = 1.0f;
 
 	// На ходу скорости центра и вращения складываются. Общая скорость
-	// крайнего слота ограничена MaxSlotSpeedFactor от скорости Squad,
-	// иначе крайние Unit бегут заметно быстрее остальных. Поворот при этом
+	// крайнего слота ограничена MaxSlotSpeedFactor от скорости Squad:
+	// иначе крайние Unit бегут заметно быстрее остальных, а при жёстком
+	// потолке скорости Unit слот становится для них недосягаемым. Поворот при этом
 	// не медленнее MinTurnRateFactor от максимальной угловой скорости.
-	float MaxSlotSpeedFactor = 1.3f;
+	float MaxSlotSpeedFactor = 1.0f;
 	float MinTurnRateFactor = 0.4f;
 
 	// Длина строки из составного приказа «движение + ширина»; 0 — нет.

@@ -239,7 +239,6 @@ void UAlgonaSimulationSubsystem::Deinitialize()
 	UnitEntities.Reset();
 	UnitState = FAlgonaUnitStateArrays();
 	Squads.Reset();
-	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	PendingCommands.Reset();
 	bStressMoveEnabled = false;

@@ -4,10 +4,8 @@
 #include "AlgonaSimulationStatus.h"
 #include "Army/AlgonaUnitSnapshot.h"
 #include "Army/AlgonaSquad.h"
-#include "Spatial/AlgonaSquadSpatialGrid.h"
-#include "Spatial/AlgonaLocalAvoidanceGrid.h"
+#include "Spatial/AlgonaTorusGrid.h"
 #include "Spatial/AlgonaUnitSpatialGrid.h"
-#include "Spatial/AlgonaSquadSpatialSnapshot.h"
 
 #include "CoreMinimal.h"
 #include "Mass/EntityHandle.h"
@@ -38,10 +36,6 @@ namespace AlgonaSimulationDefaults
 	// Групповой приказ: расстояние между точками центров Squad относительно
 	// размера самого крупного Squad группы.
 	inline constexpr double GroupSpacingFactor = 1.1;
-
-	// Dormant squad-level spatial index. Change only this value to re-enable
-	// population and updates when squad-level spatial queries are needed again.
-	inline constexpr bool EnableSquadSpatialGrid = false;
 }
 
 /** Тип команды Squad в очереди команд Simulation. */
@@ -200,15 +194,6 @@ public:
 		TArray<uint32>& OutUnitIds) const;
 
 	/**
-	 * Dormant squad-level spatial query retained for future simulation systems.
-	 * Returns no results while EnableSquadSpatialGrid is false.
-	 */
-	int32 QuerySquadsInBounds(
-		const FVector2D& WorldMin,
-		const FVector2D& WorldMax,
-		TArray<FAlgonaSquadSpatialSnapshot>& OutSquads) const;
-
-	/**
 	 * Exports complete selected squads. Retained with the dormant squad-grid
 	 * path so squad-level spatial selection can be reconnected without redesign.
 	 */
@@ -330,14 +315,10 @@ private:
 		float FacingYaw = 0.0f;
 		float UnitAcceleration = 0.0f;
 		float UnitRadius = 0.0f;
+		bool bLocalAvoidance = false;
 		bool bUnitsFaceMovement = false;
 		float UnitMaxSpeed = 0.0f;
 	};
-
-	bool IsSquadSpatialGridEnabled() const
-	{
-		return AlgonaSimulationDefaults::EnableSquadSpatialGrid;
-	}
 
 	bool CreateUnits(
 		int32 UnitCount,
@@ -380,8 +361,12 @@ private:
 	// L3: расталкивание реально перекрывшихся Unit (контакт).
 	void SeparateUnits(float DeltaTime, bool bParallel);
 
-	// Теснота Squad по тесноте его Unit — для замедления строя в L1.
-	void UpdateSquadCongestion();
+	// Сводка по Squad после движения: теснота и фактические границы.
+	void UpdateSquadSummary();
+
+	// Отбор участников L3: Squad, чьи границы пересекаются с другим Squad,
+	// плюс те, кто перестраивается или поворачивается.
+	void SelectLocalAvoidanceUnits();
 
 	// Значение CVar algona.P2.SquadCongestionSlowdown.
 	static float GetSquadCongestionSlowdown();
@@ -430,10 +415,6 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UMassEntityConfigAsset> UnitEntityConfig = nullptr;
 
-	// Kept dormant and empty while EnableSquadSpatialGrid is false.
-	FAlgonaSquadSpatialGrid SquadSpatialGrid{
-		AlgonaSimulationDefaults::SpatialGridCellSizeCm};
-
 	// Active entity-level spatial index used by Presentation and future
 	// simulation systems that need individual combat-unit queries.
 	FAlgonaUnitSpatialGrid UnitSpatialGrid{
@@ -450,10 +431,19 @@ private:
 	FAlgonaUnitStateArrays UnitState;
 	TArray<FAlgonaSquadMovementFrame> SquadMovementFrames;
 
-	// L3: мелкая сетка соседей и список Unit, которые в неё попадают.
-	// Пока это все Unit; на шаге broadphase (14) — только Unit пересекающихся Squad.
-	FAlgonaLocalAvoidanceGrid LocalAvoidanceGrid;
+	// L3: мелкая сетка соседей и список Unit, которые в неё попадают —
+	// только Unit тех Squad, которым L3 нужен (SelectLocalAvoidanceUnits).
+	FAlgonaTorusGrid LocalAvoidanceGrid;
 	TArray<int32> LocalAvoidanceUnitIndices;
+
+	// Отбор: крупная сетка Squad по их фактическим границам, рабочие массивы
+	// границ и признак «этому Squad нужен L3» по номеру Squad.
+	FAlgonaTorusGrid SquadBroadphaseGrid;
+	TArray<int32> SquadBroadphaseIndices;
+	TArray<FVector2f> SquadBoundsMin;
+	TArray<FVector2f> SquadBoundsMax;
+	TArray<uint8> SquadNeedsLocalAvoidance;
+	TArray<uint8> SquadIsMoving;
 
 	// Состояние стресс-сценария: направление следующего прохода по Y
 	// (+1 или -1) для каждого SquadId.

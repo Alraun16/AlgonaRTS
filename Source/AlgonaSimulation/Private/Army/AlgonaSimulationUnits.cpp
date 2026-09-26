@@ -127,7 +127,6 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 
 	Squads.Reset();
 	Squads.Reserve(SquadCount);
-	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	InitializeUnitState(UnitEntities.Num());
 
@@ -220,13 +219,6 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 
 			++UnitIndex;
 		}
-
-		if (IsSquadSpatialGridEnabled())
-		{
-			SquadSpatialGrid.AddSquad(
-				Squad.SquadId,
-				Squad.CenterLocation);
-		}
 	}
 
 	return UnitIndex == UnitEntities.Num();
@@ -244,7 +236,6 @@ void UAlgonaSimulationSubsystem::DestroyUnits()
 	UnitEntities.Reset();
 	UnitState = FAlgonaUnitStateArrays();
 	Squads.Reset();
-	SquadSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	PendingCommands.Reset();
 	bStressMoveEnabled = false;

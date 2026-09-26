@@ -11,12 +11,13 @@
  *
  * Состояние Unit хранится в плоских массивах UnitState (индекс = UnitId - 1),
  * и это источник истины: копирования из Mass и обратно нет.
- *   1. BuildLocalAvoidanceGrid — сетка соседей по позициям на начало тика;
- *   2. SteerUnits             — намерение Unit (L2 к слоту + обход соседей),
- *                               инерция, новая позиция, поворот;
- *   3. SeparateUnits          — контакт: расталкивание реально перекрывшихся;
- *   4. UpdateSquadCongestion  — теснота Squad для замедления строя (L1);
- *   5. UpdateUnitGrid         — Unit Grid для Unit, сменивших ячейку.
+ *   1. SelectLocalAvoidanceUnits — кому из Unit нужен L3 в этом тике;
+ *   2. BuildLocalAvoidanceGrid   — сетка соседей по их позициям;
+ *   3. SteerUnits                — намерение Unit (L2 к слоту + обход
+ *                                  соседей), инерция, новая позиция, поворот;
+ *   4. SeparateUnits             — контакт: расталкивание перекрывшихся;
+ *   5. UpdateSquadSummary        — теснота и фактические границы Squad;
+ *   6. UpdateUnitGrid            — Unit Grid для Unit, сменивших ячейку.
  * Все Unit обрабатываются каждый тик: Unit всегда потенциально подвижен.
  *
  * Многопоточность: расчёт одного Unit пишет только в элементы этого Unit,
@@ -126,6 +127,14 @@ namespace
 		TEXT("Max push speed of one unit, cm/s."),
 		ECVF_Default);
 
+	// Потолок скорости Unit для подбора на ходу, см/с. 0 — потолок берётся
+	// из Squad (CenterMoveSpeed * UnitSpeedFactor).
+	TAutoConsoleVariable<float> CVarAlgonaP2UnitMaxSpeed(
+		TEXT("algona.P2.UnitMaxSpeed"),
+		0.0f,
+		TEXT("Overrides the max unit speed in cm/s. 0 keeps the squad value."),
+		ECVF_Default);
+
 	// --- Теснота Squad (L1) ---
 
 	TAutoConsoleVariable<float> CVarAlgonaP2SquadCongestionSlowdown(
@@ -143,10 +152,21 @@ namespace
 	constexpr float MovingYieldWeight = 2.0f;
 	constexpr float IdleYieldWeight = 1.0f;
 
-	// Обход смотрит на 5×5 клеток: гарантированно видны соседи в 300 см.
+	// Клетка сетки соседей — около интервала строя: в строю обычно один Unit
+	// в клетке. Обход смотрит на 5×5 клеток, то есть видит соседей в 300 см.
+	constexpr float LocalAvoidanceCellSizeCm = 150.0f;
 	constexpr int32 AvoidanceRings = 2;
 	constexpr float AvoidanceQueryRadius =
-		AvoidanceRings * FAlgonaLocalAvoidanceGrid::CellSizeCm;
+		AvoidanceRings * LocalAvoidanceCellSizeCm;
+
+	// Отбор участников L3: крупная сетка Squad и запас к их границам —
+	// дальность обзора обхода плюс путь Unit за тик.
+	constexpr float SquadBroadphaseCellSizeCm = 2000.0f;
+	constexpr float SquadBroadphaseMarginCm = AvoidanceQueryRadius + 50.0f;
+
+	// Сколько тиков после Reform Squad остаётся участником L3: при
+	// перестроении Unit идут через чужие слоты и могут пройти насквозь.
+	constexpr int32 ReformAvoidanceHoldTicks = 40;
 
 	// Насколько сильно Unit тормозит при разных встречах (доля скорости
 	// при столкновении «прямо сейчас»; дальше по времени — слабее).
@@ -261,6 +281,8 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 		return;
 	}
 
+	const float UnitMaxSpeedOverride = CVarAlgonaP2UnitMaxSpeed.GetValueOnGameThread();
+
 	// Подготовка Squad: направления, скорость центра и максимальная скорость
 	// Unit считаются один раз на Squad, а не для каждого Unit.
 	SquadMovementFrames.SetNum(Squads.Num(), EAllowShrinking::No);
@@ -281,6 +303,8 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 			static_cast<float>(Squad.CenterVelocity.Y));
 		Frame.YawRate = Squad.YawRate;
 		Frame.UnitRadius = Squad.UnitRadius;
+		Frame.bLocalAvoidance = SquadNeedsLocalAvoidance.IsValidIndex(SquadIndex)
+			&& SquadNeedsLocalAvoidance[SquadIndex] != 0;
 
 		// В среднем режиме Unit смотрят по направлению движения, даже стоя
 		// в своих слотах: «лунный бег» боком на десяток метров выглядит странно.
@@ -290,11 +314,12 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 		Frame.UnitAcceleration =
 			Squad.CenterMoveSpeed * Squad.UnitSpeedFactor
 			/ FAlgonaSquad::UnitAccelerationSeconds;
-		Frame.UnitMaxSpeed =
-			Squad.CenterMoveSpeed
-			* (Squad.YawRate != 0.0f
-				? Squad.TurningUnitSpeedFactor
-				: Squad.UnitSpeedFactor);
+		Frame.UnitMaxSpeed = UnitMaxSpeedOverride > 0.0f
+			? UnitMaxSpeedOverride
+			: Squad.CenterMoveSpeed
+				* (Squad.YawRate != 0.0f
+					? Squad.TurningUnitSpeedFactor
+					: Squad.UnitSpeedFactor);
 	}
 
 	FAlgonaUnitStateArrays& State = UnitState;
@@ -429,7 +454,7 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 		// столкнётся в ближайшие AvoidanceHorizon секунд. Результат идёт
 		// в намерение — через инерцию, поэтому получается дуга, а не отскок.
 		// Уклоняются обе стороны: идущий и стоящий, на которого надвигаются.
-		if (bAvoidance)
+		if (bAvoidance && Frame.bLocalAvoidance)
 		{
 			// Скорость намерения, а не фактическая: иначе собственное
 			// торможение уменьшает угрозу, угроза отпускает тормоз, и Unit
@@ -780,27 +805,151 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 	RunForUnits(UnitCount, bParallel, TEXT("AlgonaSimulation_MoveUnits"), MoveUnit);
 }
 
-void UAlgonaSimulationSubsystem::BuildLocalAvoidanceGrid(bool bParallel)
+void UAlgonaSimulationSubsystem::SelectLocalAvoidanceUnits()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_SelectLocalAvoidance);
+
+	const int32 SquadCount = Squads.Num();
+	SquadNeedsLocalAvoidance.SetNumUninitialized(SquadCount, EAllowShrinking::No);
+	SquadIsMoving.SetNumUninitialized(SquadCount, EAllowShrinking::No);
+	SquadBoundsMin.SetNumUninitialized(SquadCount, EAllowShrinking::No);
+	SquadBoundsMax.SetNumUninitialized(SquadCount, EAllowShrinking::No);
+	SquadBroadphaseIndices.Reset(SquadCount);
+	LocalAvoidanceUnitIndices.Reset(UnitState.Positions.Num());
+
 	if (CVarAlgonaP2LocalAvoidanceGrid.GetValueOnGameThread() == 0)
+	{
+		FMemory::Memzero(SquadNeedsLocalAvoidance.GetData(), SquadCount * sizeof(uint8));
+		return;
+	}
+
+	// 1. Границы с запасом на дальность обзора обхода: Unit у края Squad
+	// должен увидеть чужих заранее.
+	for (int32 SquadIndex = 0; SquadIndex < SquadCount; ++SquadIndex)
+	{
+		FAlgonaSquad& Squad = Squads[SquadIndex];
+
+		// Перестроение и поворот: Unit идут через чужие слоты, поэтому L3
+		// нужен даже одинокому Squad.
+		if (Squad.LocalAvoidanceFormationRevision != Squad.FormationRevision)
+		{
+			Squad.LocalAvoidanceFormationRevision = Squad.FormationRevision;
+			Squad.LocalAvoidanceHoldTicks = ReformAvoidanceHoldTicks;
+		}
+		else if (Squad.YawRate != 0.0f)
+		{
+			Squad.LocalAvoidanceHoldTicks = ReformAvoidanceHoldTicks;
+		}
+		else if (Squad.LocalAvoidanceHoldTicks > 0)
+		{
+			--Squad.LocalAvoidanceHoldTicks;
+		}
+
+		SquadNeedsLocalAvoidance[SquadIndex] = Squad.LocalAvoidanceHoldTicks > 0 ? 1 : 0;
+
+		// Стоящий Squad рядом со стоящим соседом никому не мешает: чтобы
+		// пара попала в L3, двигаться должен хотя бы один из них.
+		SquadIsMoving[SquadIndex] =
+			(Squad.CenterSpeed > StandingSpeed
+				|| Squad.YawRate != 0.0f
+				|| Squad.LocalAvoidanceHoldTicks > 0)
+			? 1 : 0;
+
+		const FVector2f Margin(SquadBroadphaseMarginCm, SquadBroadphaseMarginCm);
+		SquadBoundsMin[SquadIndex] = Squad.UnitBoundsMin - Margin;
+		SquadBoundsMax[SquadIndex] = Squad.UnitBoundsMax + Margin;
+
+		if (!Squad.ActiveUnitIds.IsEmpty())
+		{
+			SquadBroadphaseIndices.Add(SquadIndex);
+		}
+	}
+
+	// 2. Крупная сетка Squad по этим границам и поиск пересечений.
+	// Squad немного (десятки на 100 000 Unit — тысячи), поэтому всё
+	// последовательно.
+	SquadBroadphaseGrid.RebuildFromBounds(
+		SquadBroadphaseCellSizeCm,
+		SquadBroadphaseIndices,
+		SquadBoundsMin,
+		SquadBoundsMax);
+
+	for (const int32 SquadIndex : SquadBroadphaseIndices)
+	{
+		if (SquadNeedsLocalAvoidance[SquadIndex] != 0)
+		{
+			continue;
+		}
+
+		const FVector2f& BoundsMin = SquadBoundsMin[SquadIndex];
+		const FVector2f& BoundsMax = SquadBoundsMax[SquadIndex];
+
+		SquadBroadphaseGrid.ForEachCandidateInBounds(
+			BoundsMin,
+			BoundsMax,
+			[&](int32 OtherSquadIndex)
+			{
+				if (OtherSquadIndex == SquadIndex
+					|| SquadNeedsLocalAvoidance[SquadIndex] != 0)
+				{
+					return;
+				}
+
+				if (SquadIsMoving[SquadIndex] == 0
+					&& SquadIsMoving[OtherSquadIndex] == 0)
+				{
+					return;
+				}
+
+				if (BoundsMin.X <= SquadBoundsMax[OtherSquadIndex].X
+					&& BoundsMax.X >= SquadBoundsMin[OtherSquadIndex].X
+					&& BoundsMin.Y <= SquadBoundsMax[OtherSquadIndex].Y
+					&& BoundsMax.Y >= SquadBoundsMin[OtherSquadIndex].Y)
+				{
+					SquadNeedsLocalAvoidance[SquadIndex] = 1;
+				}
+			});
+	}
+
+	// 3. Список Unit по возрастанию номера, как требует сетка: проход по
+	// всем Unit с проверкой признака их Squad. Если L3 не нужен никому,
+	// проход не делается вовсе — сто тысяч проверок впустую заметны.
+	bool bAnySquadNeedsAvoidance = false;
+	for (int32 SquadIndex = 0; SquadIndex < SquadCount; ++SquadIndex)
+	{
+		bAnySquadNeedsAvoidance |= SquadNeedsLocalAvoidance[SquadIndex] != 0;
+	}
+
+	if (!bAnySquadNeedsAvoidance)
 	{
 		return;
 	}
 
-	// Пока в L3 участвуют все Unit. Список пересобирается только при
-	// изменении числа Unit.
+	const int32* SquadIdData = UnitState.SquadIds.GetData();
 	const int32 UnitCount = UnitState.Positions.Num();
 
-	if (LocalAvoidanceUnitIndices.Num() != UnitCount)
+	for (int32 UnitIndex = 0; UnitIndex < UnitCount; ++UnitIndex)
 	{
-		LocalAvoidanceUnitIndices.SetNumUninitialized(UnitCount);
-		for (int32 UnitIndex = 0; UnitIndex < UnitCount; ++UnitIndex)
+		const int32 SquadId = SquadIdData[UnitIndex];
+		if (SquadId >= 0
+			&& SquadId < SquadCount
+			&& SquadNeedsLocalAvoidance[SquadId] != 0)
 		{
-			LocalAvoidanceUnitIndices[UnitIndex] = UnitIndex;
+			LocalAvoidanceUnitIndices.Add(UnitIndex);
 		}
 	}
+}
 
-	LocalAvoidanceGrid.Rebuild(
+void UAlgonaSimulationSubsystem::BuildLocalAvoidanceGrid(bool bParallel)
+{
+	if (LocalAvoidanceUnitIndices.IsEmpty())
+	{
+		LocalAvoidanceGrid.Reset();
+		return;
+	}
+
+	LocalAvoidanceGrid.RebuildFromPoints(
+		LocalAvoidanceCellSizeCm,
 		LocalAvoidanceUnitIndices,
 		UnitState.Positions,
 		bParallel);
@@ -823,6 +972,14 @@ void UAlgonaSimulationSubsystem::SeparateUnits(
 	FAlgonaUnitStateArrays& State = UnitState;
 	const int32 UnitCount = State.Positions.Num();
 	const int32 SquadCount = SquadMovementFrames.Num();
+
+	// Никто не участвует в L3: глубины касания обнуляются одним махом,
+	// а проход по всем Unit не делается.
+	if (LocalAvoidanceUnitIndices.IsEmpty())
+	{
+		FMemory::Memzero(State.ContactDepths.GetData(), UnitCount * sizeof(float));
+		return;
+	}
 
 	const float Stiffness = CVarAlgonaP2SeparationStiffness.GetValueOnGameThread();
 	const float Tolerance = FMath::Max(CVarAlgonaP2SeparationTolerance.GetValueOnGameThread(), 0.0f);
@@ -849,6 +1006,13 @@ void UAlgonaSimulationSubsystem::SeparateUnits(
 		const int32 SquadId = SquadIdData[UnitIndex];
 
 		if (SquadId < 0 || SquadId >= SquadCount)
+		{
+			PushData[UnitIndex] = Push;
+			ContactData[UnitIndex] = 0.0f;
+			return;
+		}
+
+		if (!FrameData[SquadId].bLocalAvoidance)
 		{
 			PushData[UnitIndex] = Push;
 			ContactData[UnitIndex] = 0.0f;
@@ -924,7 +1088,19 @@ void UAlgonaSimulationSubsystem::SeparateUnits(
 
 	auto ApplyPush = [&](int32 UnitIndex)
 	{
-		const FVector2f Delta = PushData[UnitIndex] * DeltaTime;
+		const int32 SquadId = SquadIdData[UnitIndex];
+		if (SquadId < 0 || SquadId >= SquadCount)
+		{
+			return;
+		}
+
+		// Толчок добавляется поверх движения, но общая скорость Unit не
+		// превышает его максимум: иначе после перестроения Unit «вылетали»
+		// на свои слоты быстрее, чем вообще умеют бегать.
+		const FVector2f Combined = (VelocityData[UnitIndex] + PushData[UnitIndex])
+			.GetClampedToMaxSize(FrameData[SquadId].UnitMaxSpeed);
+
+		const FVector2f Delta = (Combined - VelocityData[UnitIndex]) * DeltaTime;
 		if (Delta.SizeSquared() <= UE_KINDA_SMALL_NUMBER)
 		{
 			return;
@@ -947,14 +1123,17 @@ void UAlgonaSimulationSubsystem::SeparateUnits(
 	RunForUnits(UnitCount, bParallel, TEXT("AlgonaSimulation_ApplySeparation"), ApplyPush);
 }
 
-void UAlgonaSimulationSubsystem::UpdateSquadCongestion()
+void UAlgonaSimulationSubsystem::UpdateSquadSummary()
 {
-	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_UpdateSquadCongestion);
+	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_UpdateSquadSummary);
 
-	// Теснота Squad — средняя теснота его Unit, усиленная: обычно заторможены
-	// только передние ряды, а строю уже пора сбавить ход. L1 в следующем тике
-	// плавно снижает скорость Squad по этому значению.
+	// Сводка по Squad после движения Unit:
+	// - теснота (средняя по Unit, усиленная: обычно заторможены только
+	//   передние ряды) — L1 в следующем тике плавно снижает скорость Squad;
+	// - фактические границы — прямоугольник, реально занятый Unit, по нему
+	//   в следующем тике отбираются участники L3.
 	const float* CrowdingData = UnitState.Crowding.GetData();
+	const FVector* PositionData = UnitState.Positions.GetData();
 
 	for (FAlgonaSquad& Squad : Squads)
 	{
@@ -962,18 +1141,37 @@ void UAlgonaSimulationSubsystem::UpdateSquadCongestion()
 		if (MemberCount == 0)
 		{
 			Squad.Congestion = 0.0f;
+			Squad.UnitBoundsMin = FVector2f(
+				static_cast<float>(Squad.CenterLocation.X),
+				static_cast<float>(Squad.CenterLocation.Y));
+			Squad.UnitBoundsMax = Squad.UnitBoundsMin;
 			continue;
 		}
 
 		float CrowdingSum = 0.0f;
+		FVector2f BoundsMin(TNumericLimits<float>::Max());
+		FVector2f BoundsMax(TNumericLimits<float>::Lowest());
+
 		for (const uint32 UnitId : Squad.ActiveUnitIds)
 		{
-			CrowdingSum += CrowdingData[static_cast<int32>(UnitId) - 1];
+			const int32 UnitIndex = static_cast<int32>(UnitId) - 1;
+			CrowdingSum += CrowdingData[UnitIndex];
+
+			const FVector2f Position(
+				static_cast<float>(PositionData[UnitIndex].X),
+				static_cast<float>(PositionData[UnitIndex].Y));
+			BoundsMin = FVector2f::Min(BoundsMin, Position);
+			BoundsMax = FVector2f::Max(BoundsMax, Position);
 		}
 
 		Squad.Congestion = FMath::Min(
 			CrowdingSum / static_cast<float>(MemberCount) * SquadCongestionGain,
 			1.0f);
+
+		// Запас на радиус Unit: границы должны накрывать тела, а не центры.
+		const FVector2f RadiusMargin(Squad.UnitRadius, Squad.UnitRadius);
+		Squad.UnitBoundsMin = BoundsMin - RadiusMargin;
+		Squad.UnitBoundsMax = BoundsMax + RadiusMargin;
 	}
 }
 

@@ -73,8 +73,9 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	// Режим читается один раз, чтобы весь шаг шёл в одном режиме.
 	const bool bParallelMovement = IsParallelMovementEnabled();
 
-	// L3: сетка соседей по позициям на начало тика — по ней Unit
-	// заранее обходят друг друга.
+	// L3: отбор участников (Squad, чьи границы пересекаются с другим Squad,
+	// плюс перестраивающиеся) и сетка соседей по их позициям на начало тика.
+	SelectLocalAvoidanceUnits();
 	BuildLocalAvoidanceGrid(bParallelMovement);
 
 	const double LocalGridEndSeconds =
@@ -86,10 +87,10 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	const double SteerEndSeconds =
 		FPlatformTime::Seconds();
 
-	// L3: контакт — расталкивание реально перекрывшихся Unit, затем
-	// теснота Squad для замедления строя в следующем тике.
+	// L3: контакт — расталкивание реально перекрывшихся Unit, затем сводка
+	// по Squad (теснота и фактические границы) для следующего тика.
 	SeparateUnits(DeltaTime, bParallelMovement);
-	UpdateSquadCongestion();
+	UpdateSquadSummary();
 
 	const double SeparationEndSeconds =
 		FPlatformTime::Seconds();
@@ -635,14 +636,6 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 
 		bSquadChanged |= !OldCenterLocation.Equals(Squad.CenterLocation, KINDA_SMALL_NUMBER);
 		bAnySquadChanged |= bSquadChanged;
-
-		if (IsSquadSpatialGridEnabled())
-		{
-			SquadSpatialGrid.UpdateSquad(
-				Squad.SquadId,
-				OldCenterLocation,
-				Squad.CenterLocation);
-		}
 	}
 
 	return bAnySquadChanged;
