@@ -295,7 +295,11 @@ bool FAlgonaP2FormationSlotAssignmentTest::RunTest(
 	}
 
 	TArray<int32> SlotForUnit;
-	BuildAlgonaSlotAssignmentByPosition(NarrowLayout, LocalPositions, SlotForUnit);
+	BuildAlgonaSlotAssignmentByPosition(
+		NarrowLayout,
+		LocalPositions,
+		TConstArrayView<float>(),
+		SlotForUnit);
 
 	TestEqual(TEXT("Assignment size"), SlotForUnit.Num(), LocalPositions.Num());
 

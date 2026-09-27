@@ -147,10 +147,20 @@ namespace
 	// идущими и при расталкивании уступает меньше движущегося, см/с.
 	constexpr float StandingSpeed = 30.0f;
 
-	// Доли уступки при контакте: стоящий держит место надёжнее и берёт 1/3
-	// сдвига, движущийся — 2/3. Одинаковые — поровну.
+	// Подвижность при расхождении: чем она выше, тем большую долю сдвига
+	// Unit берёт на себя. Стоящий держит место надёжнее движущегося, а
+	// крупный — надёжнее мелкого: подвижность падает линейно с радиусом,
+	// поэтому тролль сдвигает пехотинца вдвое охотнее, чем наоборот.
 	constexpr float MovingYieldWeight = 2.0f;
 	constexpr float IdleYieldWeight = 1.0f;
+
+	float GetYieldMobility(bool bMoving, float Radius)
+	{
+		const float MoveFactor = bMoving ? MovingYieldWeight : IdleYieldWeight;
+		return Radius > UE_SMALL_NUMBER
+			? MoveFactor * FAlgonaSquad::DefaultUnitRadiusCm / Radius
+			: MoveFactor;
+	}
 
 	// Клетка сетки соседей — около интервала строя: в строю обычно один Unit
 	// в клетке. Обход смотрит на 5×5 клеток, то есть видит соседей в 300 см.
@@ -190,6 +200,15 @@ namespace
 	// свободной с небольшим зазором, а не «в притык».
 	constexpr float AvoidanceGapMargin = 2.0f;
 
+	// Сторона обхода меняется, только если щель с другой стороны заметно
+	// ближе: иначе Unit виляет влево-вправо, пока протискивается.
+	constexpr float AvoidanceSideSwitchRatio = 0.7f;
+
+	// Насколько далеко Unit вообще тянется к щели, в своих радиусах.
+	// Если ближайшая щель дальше, Unit не дёргается: тормозит и
+	// протискивается, а разводит его толчок.
+	constexpr float AvoidanceMaxGapDistanceInRadii = 3.0f;
+
 	// Доля прошлого уклонения в новом: сглаживает смену решения, чтобы Unit
 	// не дёргался, когда сосед то попадает, то не попадает на его линию.
 	constexpr float AvoidanceDodgeSmoothing = 0.5f;
@@ -219,7 +238,7 @@ namespace
 		float Low = 0.0f;
 		float High = 0.0f;
 		float Time = 0.0f;
-		float OtherWeight = 0.0f;
+		float OtherMobility = 0.0f;
 	};
 
 	template <typename BodyType>
@@ -258,6 +277,8 @@ void UAlgonaSimulationSubsystem::InitializeUnitState(int32 UnitCount)
 	State.Velocities.Init(FVector2f::ZeroVector, UnitCount);
 	State.SquadIds.Init(INDEX_NONE, UnitCount);
 	State.SlotIndices.Init(INDEX_NONE, UnitCount);
+	State.Radii.Init(FAlgonaSquad::DefaultUnitRadiusCm, UnitCount);
+	State.MeshScales.Init(1.0f, UnitCount);
 	State.DesiredVelocities.Init(FVector2f::ZeroVector, UnitCount);
 	State.NextVelocities.Init(FVector2f::ZeroVector, UnitCount);
 	State.Crowding.Init(0.0f, UnitCount);
@@ -302,7 +323,6 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 			static_cast<float>(Squad.CenterVelocity.X),
 			static_cast<float>(Squad.CenterVelocity.Y));
 		Frame.YawRate = Squad.YawRate;
-		Frame.UnitRadius = Squad.UnitRadius;
 		Frame.bLocalAvoidance = SquadNeedsLocalAvoidance.IsValidIndex(SquadIndex)
 			&& SquadNeedsLocalAvoidance[SquadIndex] != 0;
 
@@ -326,8 +346,11 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 	const int32 UnitCount = State.Positions.Num();
 	const int32 SquadCount = SquadMovementFrames.Num();
 
-	const float MaxTurnStep =
+	// Скорость поворота тела обратно пропорциональна радиусу: крупному
+	// существу развернуться тяжелее, чем пехотинцу.
+	const float TurnStepPerRadius =
 		FMath::DegreesToRadians(AlgonaUnitSteering::MaxTurnRateDegrees)
+		* FAlgonaSquad::DefaultUnitRadiusCm
 		* DeltaTime;
 	const float FaceMovementMinDistanceSquared =
 		FMath::Square(AlgonaUnitSteering::FaceMovementMinDistance);
@@ -358,6 +381,7 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 	const FAlgonaSquadMovementFrame* FrameData = SquadMovementFrames.GetData();
 	const int32* SquadIdData = State.SquadIds.GetData();
 	const int32* SlotIndexData = State.SlotIndices.GetData();
+	const float* RadiusData = State.Radii.GetData();
 	FVector* PositionData = State.Positions.GetData();
 	FVector2f* VelocityData = State.Velocities.GetData();
 	FVector2f* DesiredData = State.DesiredVelocities.GetData();
@@ -465,7 +489,7 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 				? IntentVelocity.GetSafeNormal()
 				: FVector2f::ZeroVector;
 			const FVector2f RightDirection(-MoveDirection.Y, MoveDirection.X);
-			const float MyWeight = bMoving ? MovingYieldWeight : IdleYieldWeight;
+			const float MyMobility = GetYieldMobility(bMoving, RadiusData[UnitIndex]);
 
 			FVector2f Dodge = FVector2f::ZeroVector;
 			float Brake = 0.0f;
@@ -520,20 +544,24 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 
 				const FVector2f ClosingVelocity = IntentVelocity - OtherVelocity;
 				const float CollisionDistance =
-					Frame.UnitRadius + FrameData[OtherSquadId].UnitRadius + PersonalSpace;
+					RadiusData[UnitIndex] + RadiusData[OtherIndex] + PersonalSpace;
 
 				const float TimeToCollision = AlgonaUnitSteering::ComputeTimeToCollision(
 					ToOther,
 					ClosingVelocity,
 					CollisionDistance);
 
-				if (TimeToCollision < 0.0f || TimeToCollision > AvoidanceHorizon)
-				{
-					return;
-				}
+				// Столкновение в пределах обзора по времени: от этого зависит
+				// торможение. Отрезок на поперечной оси откладывается и без
+				// него — по всем соседям впереди, иначе Unit целится в щель,
+				// которой в ряду на самом деле нет, и виляет от тика к тику.
+				const bool bCollisionAhead =
+					TimeToCollision >= 0.0f && TimeToCollision <= AvoidanceHorizon;
 
 				// Чем ближе столкновение по времени, тем сильнее торможение.
-				const float Urgency = 1.0f - TimeToCollision / AvoidanceHorizon;
+				const float Urgency = bCollisionAhead
+					? 1.0f - TimeToCollision / AvoidanceHorizon
+					: 0.0f;
 
 				if (bMoving && bOtherMoving)
 				{
@@ -544,6 +572,7 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 					if (Cosine > SameDirectionCosine)
 					{
 						// Попутный впереди: притормозить и идти следом.
+						// В стену он не превращается: идёт туда же, куда и я.
 						Brake = FMath::Max(Brake, Urgency * FollowBrake);
 						return;
 					}
@@ -585,11 +614,11 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 					FAvoidanceThreat& Threat = Threats[ThreatCount++];
 					Threat.Low = LateralCenter - CollisionDistance;
 					Threat.High = LateralCenter + CollisionDistance;
-					Threat.Time = TimeToCollision;
-					Threat.OtherWeight = bOtherMoving ? MovingYieldWeight : IdleYieldWeight;
+					Threat.Time = bCollisionAhead ? TimeToCollision : -1.0f;
+					Threat.OtherMobility = GetYieldMobility(bOtherMoving, RadiusData[OtherIndex]);
 				}
 
-				if (bMoving)
+				if (bMoving && bCollisionAhead)
 				{
 					Brake = FMath::Max(Brake, Urgency * PassBrake);
 				}
@@ -601,13 +630,16 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 			// в одну сторону. Правило «все вправо» здесь больше не нужно.
 			if (ThreatCount > 0)
 			{
-				// Занят ли мой путь: попадаю ли я в чей-то отрезок.
+				// Занят ли мой путь: попадаю ли я в чей-то отрезок и дойдёт ли
+				// до столкновения. Щели ищутся по всем соседям впереди, а
+				// уклоняться есть смысл только от того, с кем столкнусь.
 				const FAvoidanceThreat* Blocker = nullptr;
 
 				for (int32 Index = 0; Index < ThreatCount; ++Index)
 				{
 					const FAvoidanceThreat& Threat = Threats[Index];
-					if (Threat.Low < 0.0f
+					if (Threat.Time >= 0.0f
+						&& Threat.Low < 0.0f
 						&& Threat.High > 0.0f
 						&& (Blocker == nullptr || Threat.Time < Blocker->Time))
 					{
@@ -622,7 +654,17 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 					// При равенстве сторону решает моё место в строю: левая
 					// половина уходит влево, правая вправо — строй раскрывается
 					// и обтекает с двух сторон, а не сносится целиком.
-					const float TieSide = LocalOffset.Y >= 0.0f ? 1.0f : -1.0f;
+					// Сторона, выбранная в прошлом тике: её Unit и держится.
+					const float PreviousSide = FVector2f::DotProduct(
+						DodgeData[UnitIndex],
+						RightDirection);
+
+					const float TieSide = PreviousSide > UE_SMALL_NUMBER
+						? 1.0f
+						: (PreviousSide < -UE_SMALL_NUMBER
+							? -1.0f
+							: (LocalOffset.Y >= 0.0f ? 1.0f : -1.0f));
+
 					float BestOffset = 0.0f;
 					bool bFoundGap = false;
 
@@ -655,10 +697,22 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 							const float BestDistance = FMath::Abs(BestOffset);
 							const float CandidateDistance = FMath::Abs(Candidate);
 
+							// Своя сторона (выбранная раньше) держится, пока
+							// чужая не станет заметно ближе.
+							const bool bCandidateOnTieSide = Candidate * TieSide >= 0.0f;
+							const bool bBestOnTieSide = BestOffset * TieSide >= 0.0f;
+
+							const float CandidateWeight = bCandidateOnTieSide
+								? CandidateDistance * AvoidanceSideSwitchRatio
+								: CandidateDistance;
+							const float BestWeight = bBestOnTieSide
+								? BestDistance * AvoidanceSideSwitchRatio
+								: BestDistance;
+
 							const bool bBetter = !bFoundGap
-								|| CandidateDistance < BestDistance - AvoidanceGapMargin
-								|| (CandidateDistance < BestDistance + AvoidanceGapMargin
-									&& Candidate * TieSide > BestOffset * TieSide);
+								|| CandidateWeight < BestWeight - AvoidanceGapMargin
+								|| (CandidateWeight < BestWeight + AvoidanceGapMargin
+									&& bCandidateOnTieSide && !bBestOnTieSide);
 
 							if (bBetter)
 							{
@@ -668,11 +722,20 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 						}
 					}
 
+					// Щель дальше, чем Unit разумно тянуться: не дёргаться,
+					// а протискиваться — разведёт толчок.
+					if (bFoundGap
+						&& FMath::Abs(BestOffset)
+							> RadiusData[UnitIndex] * AvoidanceMaxGapDistanceInRadii)
+					{
+						bFoundGap = false;
+					}
+
 					if (bFoundGap)
 					{
 						// Сдвигаюсь на свою долю: идущий берёт 2/3, стоящий 1/3,
 						// остальное проходит встречный.
-						const float Share = MyWeight / (MyWeight + Blocker->OtherWeight);
+						const float Share = MyMobility / (MyMobility + Blocker->OtherMobility);
 
 						Dodge = RightDirection * (BestOffset * Share
 							/ FMath::Max(Blocker->Time, AvoidanceMinDodgeTime));
@@ -778,11 +841,13 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 			? static_cast<float>(FMath::Atan2(FacingVelocity.Y, FacingVelocity.X))
 			: Frame.FacingYaw;
 
+		const float Radius = FMath::Max(RadiusData[UnitIndex], UE_SMALL_NUMBER);
+
 		float& FacingYaw = FacingYawData[UnitIndex];
 		const float NewFacingYaw = AlgonaUnitSteering::StepYawTowards(
 			FacingYaw,
 			TargetYaw,
-			MaxTurnStep);
+			TurnStepPerRadius / Radius);
 
 		if (NewFacingYaw != FacingYaw)
 		{
@@ -952,6 +1017,7 @@ void UAlgonaSimulationSubsystem::BuildLocalAvoidanceGrid(bool bParallel)
 		LocalAvoidanceCellSizeCm,
 		LocalAvoidanceUnitIndices,
 		UnitState.Positions,
+		UnitState.Radii,
 		bParallel);
 }
 
@@ -989,6 +1055,7 @@ void UAlgonaSimulationSubsystem::SeparateUnits(
 	const FVector* PositionData = State.Positions.GetData();
 	const FVector2f* VelocityData = State.Velocities.GetData();
 	const int32* SquadIdData = State.SquadIds.GetData();
+	const float* RadiusData = State.Radii.GetData();
 	const FAlgonaSquadMovementFrame* FrameData = SquadMovementFrames.GetData();
 	FVector2f* PushData = State.SeparationVelocities.GetData();
 	float* CrowdingData = State.Crowding.GetData();
@@ -1020,10 +1087,10 @@ void UAlgonaSimulationSubsystem::SeparateUnits(
 		}
 
 		const FVector& Position = PositionData[UnitIndex];
-		const float Radius = FrameData[SquadId].UnitRadius;
-		const float MyWeight = VelocityData[UnitIndex].SizeSquared() > StandingSpeedSquared
-			? MovingYieldWeight
-			: IdleYieldWeight;
+		const float Radius = RadiusData[UnitIndex];
+		const float MyMobility = GetYieldMobility(
+			VelocityData[UnitIndex].SizeSquared() > StandingSpeedSquared,
+			Radius);
 
 		LocalAvoidanceGrid.ForEachCandidate(Position, 1, [&](int32 OtherIndex)
 		{
@@ -1044,7 +1111,7 @@ void UAlgonaSimulationSubsystem::SeparateUnits(
 				static_cast<float>(Position.Y - OtherPosition.Y));
 
 			const float PushDistance =
-				Radius + FrameData[OtherSquadId].UnitRadius - Tolerance;
+				Radius + RadiusData[OtherIndex] - Tolerance;
 			const float DistanceSquared = Offset.SizeSquared();
 
 			if (PushDistance <= 0.0f || DistanceSquared >= FMath::Square(PushDistance))
@@ -1059,11 +1126,10 @@ void UAlgonaSimulationSubsystem::SeparateUnits(
 				? Offset / Distance
 				: FVector2f(UnitIndex < OtherIndex ? -1.0f : 1.0f, 0.0f);
 
-			const float OtherWeight =
-				VelocityData[OtherIndex].SizeSquared() > StandingSpeedSquared
-					? MovingYieldWeight
-					: IdleYieldWeight;
-			const float Share = MyWeight / (MyWeight + OtherWeight);
+			const float OtherMobility = GetYieldMobility(
+				VelocityData[OtherIndex].SizeSquared() > StandingSpeedSquared,
+				RadiusData[OtherIndex]);
+			const float Share = MyMobility / (MyMobility + OtherMobility);
 
 			const float Overlap = PushDistance - Distance;
 			Push += Normal * (Overlap * Stiffness * Share);
@@ -1133,6 +1199,7 @@ void UAlgonaSimulationSubsystem::UpdateSquadSummary()
 	// - фактические границы — прямоугольник, реально занятый Unit, по нему
 	//   в следующем тике отбираются участники L3.
 	const float* CrowdingData = UnitState.Crowding.GetData();
+	const float* RadiusData = UnitState.Radii.GetData();
 	const FVector* PositionData = UnitState.Positions.GetData();
 
 	for (FAlgonaSquad& Squad : Squads)
@@ -1149,6 +1216,7 @@ void UAlgonaSimulationSubsystem::UpdateSquadSummary()
 		}
 
 		float CrowdingSum = 0.0f;
+		float MaxRadius = 0.0f;
 		FVector2f BoundsMin(TNumericLimits<float>::Max());
 		FVector2f BoundsMax(TNumericLimits<float>::Lowest());
 
@@ -1156,6 +1224,8 @@ void UAlgonaSimulationSubsystem::UpdateSquadSummary()
 		{
 			const int32 UnitIndex = static_cast<int32>(UnitId) - 1;
 			CrowdingSum += CrowdingData[UnitIndex];
+
+			MaxRadius = FMath::Max(MaxRadius, RadiusData[UnitIndex]);
 
 			const FVector2f Position(
 				static_cast<float>(PositionData[UnitIndex].X),
@@ -1168,8 +1238,10 @@ void UAlgonaSimulationSubsystem::UpdateSquadSummary()
 			CrowdingSum / static_cast<float>(MemberCount) * SquadCongestionGain,
 			1.0f);
 
+		Squad.MaxUnitRadius = FMath::Max(MaxRadius, UE_SMALL_NUMBER);
+
 		// Запас на радиус Unit: границы должны накрывать тела, а не центры.
-		const FVector2f RadiusMargin(Squad.UnitRadius, Squad.UnitRadius);
+		const FVector2f RadiusMargin(MaxRadius, MaxRadius);
 		Squad.UnitBoundsMin = BoundsMin - RadiusMargin;
 		Squad.UnitBoundsMax = BoundsMax + RadiusMargin;
 	}

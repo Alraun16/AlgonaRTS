@@ -35,10 +35,17 @@ public:
 	 * Перестраивает сетку по точкам. Indices — номера участвующих элементов
 	 * по возрастанию, Positions — позиции всех элементов по этому номеру.
 	 */
+	/**
+	 * Radii (может быть пустым) — радиусы элементов. Элемент крупнее
+	 * половины клетки кладётся во все клетки, которые накрывает: иначе
+	 * сосед с обычным радиусом не нашёл бы его поиском вокруг себя.
+	 * Мелкие элементы по-прежнему занимают ровно одну клетку.
+	 */
 	void RebuildFromPoints(
 		float InCellSize,
 		TConstArrayView<int32> Indices,
 		TConstArrayView<FVector> Positions,
+		TConstArrayView<float> Radii,
 		bool bParallel);
 
 	/**

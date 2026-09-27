@@ -382,7 +382,9 @@ void UAlgonaSimulationSubsystem::ReassignSquadSlotsByPosition(FAlgonaSquad& Squa
 	const FVector Right = FVector::CrossProduct(FVector::UpVector, Forward).GetSafeNormal();
 
 	TArray<FVector2f> LocalPositions;
+	TArray<float> Radii;
 	LocalPositions.Reserve(MemberCount);
+	Radii.Reserve(MemberCount);
 
 	for (const uint32 UnitId : Squad.ActiveUnitIds)
 	{
@@ -392,10 +394,15 @@ void UAlgonaSimulationSubsystem::ReassignSquadSlotsByPosition(FAlgonaSquad& Squa
 		LocalPositions.Emplace(
 			static_cast<float>(FVector::DotProduct(Offset, Forward)),
 			static_cast<float>(FVector::DotProduct(Offset, Right)));
+		Radii.Add(UnitState.Radii[static_cast<int32>(UnitId) - 1]);
 	}
 
 	TArray<int32> SlotForUnit;
-	BuildAlgonaSlotAssignmentByPosition(Squad.FormationLayout, LocalPositions, SlotForUnit);
+	BuildAlgonaSlotAssignmentByPosition(
+		Squad.FormationLayout,
+		LocalPositions,
+		Radii,
+		SlotForUnit);
 
 	TArray<uint32> ReassignedUnitIds;
 	ReassignedUnitIds.SetNumUninitialized(MemberCount);
@@ -446,6 +453,11 @@ bool UAlgonaSimulationSubsystem::ApplyMirrorTurn(FAlgonaSquad& Squad)
 	Squad.ActiveUnitIds = MoveTemp(ReorderedUnitIds);
 	Squad.FacingDirection = -Squad.GetForwardDirection2D();
 	++Squad.FormationRevision;
+
+	// Первая строка теперь с другой стороны: крупные Unit должны перейти
+	// в неё, а освободившиеся места займут те, кто ближе. Для однородного
+	// отряда назначение выходит тождественным, и никто не двигается.
+	ReassignSquadSlotsByPosition(Squad);
 	return true;
 }
 

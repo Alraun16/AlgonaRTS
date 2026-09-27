@@ -1,6 +1,8 @@
 #include "Core/AlgonaSimulationSubsystem.h"
 
 #include "Army/AlgonaUnitFragments.h"
+
+#include "HAL/IConsoleManager.h"
 #include "Army/AlgonaUnitTrait.h"
 
 #include "Engine/World.h"
@@ -80,6 +82,40 @@ bool UAlgonaSimulationSubsystem::CreateUnits(
 	return true;
 }
 
+namespace
+{
+	// Тестовые отряды крупных существ, пока нет типов существ (P3).
+	// Каждый N-й отряд создаётся особым: 0 — выключено.
+	TAutoConsoleVariable<int32> CVarAlgonaP2LargeSquadEvery(
+		TEXT("algona.P2.LargeSquadEvery"),
+		50,
+		TEXT("Every Nth squad is made of large units (test content). 0 disables it."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarAlgonaP2MixedSquadEvery(
+		TEXT("algona.P2.MixedSquadEvery"),
+		25,
+		TEXT("Every Nth squad mixes large and normal units (test content). 0 disables it."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<float> CVarAlgonaP2LargeUnitRadius(
+		TEXT("algona.P2.LargeUnitRadius"),
+		70.0f,
+		TEXT("Body radius of a large test unit, cm."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<float> CVarAlgonaP2LargeUnitMeshScale(
+		TEXT("algona.P2.LargeUnitMeshScale"),
+		2.5f,
+		TEXT("Mesh scale of a large test unit."),
+		ECVF_Default);
+
+	// Состав тестовых отрядов: только крупные и смешанный.
+	constexpr int32 LargeSquadMemberCount = 5;
+	constexpr int32 MixedSquadMemberCount = 8;
+	constexpr int32 MixedSquadLargeCount = 2;
+}
+
 bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 {
 	if (!MassEntitySubsystem
@@ -121,28 +157,88 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 	const float SquadSpacingY =
 		FormationWorldWidth + SpaceBetweenSquads;
 
-	const int32 SquadCount = FMath::DivideAndRoundUp(
+	// Оценка числа отрядов: тестовые отряды крупных существ меньше обычных,
+	// поэтому их получится больше. Точное число известно только по ходу.
+	const int32 EstimatedSquadCount = FMath::DivideAndRoundUp(
 		UnitEntities.Num(),
 		RequestedSquadSize);
 
 	Squads.Reset();
-	Squads.Reserve(SquadCount);
+	Squads.Reserve(EstimatedSquadCount);
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	InitializeUnitState(UnitEntities.Num());
 
 	int32 UnitIndex = 0;
+	int32 LargeSquadCount = 0;
+	int32 MixedSquadCount = 0;
+	int32 LargeUnitCount = 0;
 
+	// Отряды создаются, пока есть нераспределённые Unit: состав отряда
+	// зависит от его номера, поэтому число отрядов заранее неизвестно.
 	for (int32 SquadIndex = 0;
-		SquadIndex < SquadCount;
+		UnitIndex < UnitEntities.Num();
 		++SquadIndex)
 	{
-		// Массив зарезервирован заранее, поэтому ссылка остаётся валидной.
+		// Ссылка живёт только внутри этого витка цикла.
 		FAlgonaSquad& Squad = Squads.AddDefaulted_GetRef();
 		Squad.SquadId = SquadIndex;
 
+		// Тестовые отряды крупных существ: каждый N-й отряд особого состава.
+		// Крупные занимают передние слоты, поэтому в смешанном отряде они
+		// оказываются в первой строке.
+		const int32 LargeSquadEvery = CVarAlgonaP2LargeSquadEvery.GetValueOnGameThread();
+		const int32 MixedSquadEvery = CVarAlgonaP2MixedSquadEvery.GetValueOnGameThread();
+
+		int32 RequestedMemberCount = RequestedSquadSize;
+		int32 LargeMemberCount = 0;
+
+		if (LargeSquadEvery > 0 && SquadIndex % LargeSquadEvery == 0)
+		{
+			RequestedMemberCount = LargeSquadMemberCount;
+			LargeMemberCount = LargeSquadMemberCount;
+		}
+		else if (MixedSquadEvery > 0 && SquadIndex % MixedSquadEvery == 0)
+		{
+			RequestedMemberCount = MixedSquadMemberCount;
+			LargeMemberCount = MixedSquadLargeCount;
+		}
+
 		const int32 MemberCount = FMath::Min(
-			RequestedSquadSize,
+			RequestedMemberCount,
 			UnitEntities.Num() - UnitIndex);
+
+		LargeMemberCount = FMath::Min(LargeMemberCount, MemberCount);
+
+		if (LargeMemberCount > 0)
+		{
+			LargeUnitCount += LargeMemberCount;
+
+			if (LargeMemberCount == MemberCount)
+			{
+				++LargeSquadCount;
+			}
+			else
+			{
+				++MixedSquadCount;
+			}
+		}
+
+		// Размеры Unit задаются до раскладки: интервал строя зависит от
+		// самого крупного Unit состава.
+		const float LargeRadius = CVarAlgonaP2LargeUnitRadius.GetValueOnGameThread();
+		const float LargeMeshScale = CVarAlgonaP2LargeUnitMeshScale.GetValueOnGameThread();
+
+		for (int32 SlotIndex = 0; SlotIndex < MemberCount; ++SlotIndex)
+		{
+			const bool bLarge = SlotIndex < LargeMemberCount;
+			UnitState.Radii[UnitIndex + SlotIndex] =
+				bLarge ? LargeRadius : Squad.UnitRadius;
+			UnitState.MeshScales[UnitIndex + SlotIndex] = bLarge ? LargeMeshScale : 1.0f;
+		}
+
+		Squad.MaxUnitRadius = LargeMemberCount > 0
+			? FMath::Max(LargeRadius, Squad.UnitRadius)
+			: Squad.UnitRadius;
 
 		// Состав заполняется заранее: UnitId детерминирован (номер Unit + 1),
 		// поэтому раскладку можно построить до записи состояния Unit.
@@ -221,6 +317,21 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 		}
 	}
 
+	// Явный отчёт о составе: сразу видно, применились ли настройки
+	// тестовых отрядов крупных существ.
+	UE_LOG(
+		LogAlgonaSimulation,
+		Display,
+		TEXT("[P2 Squads] composition squads=%d large=%d mixed=%d largeUnits=%d (radius=%.0f meshScale=%.1f, every large=%d mixed=%d)"),
+		Squads.Num(),
+		LargeSquadCount,
+		MixedSquadCount,
+		LargeUnitCount,
+		CVarAlgonaP2LargeUnitRadius.GetValueOnGameThread(),
+		CVarAlgonaP2LargeUnitMeshScale.GetValueOnGameThread(),
+		CVarAlgonaP2LargeSquadEvery.GetValueOnGameThread(),
+		CVarAlgonaP2MixedSquadEvery.GetValueOnGameThread());
+
 	return UnitIndex == UnitEntities.Num();
 }
 
@@ -263,6 +374,7 @@ void UAlgonaSimulationSubsystem::AppendUnitSnapshot(
 	Snapshot.Facing = FQuat(
 		FVector::UpVector,
 		UnitState.FacingYaws[UnitIndex]);
+	Snapshot.MeshScale = UnitState.MeshScales[UnitIndex];
 }
 
 int32 UAlgonaSimulationSubsystem::ExportUnitSnapshotsForSquads(

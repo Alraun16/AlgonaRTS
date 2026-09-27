@@ -6,6 +6,14 @@ FVector FAlgonaSquad::GetForwardDirection2D() const
 	return Forward.IsNearlyZero() ? FVector::ForwardVector : Forward;
 }
 
+float FAlgonaSquad::GetSlotSpacing() const
+{
+	// Тела крупных Unit должны помещаться между слотами с просветом.
+	return FMath::Max(
+		DefaultSlotSpacingCm,
+		2.0f * MaxUnitRadius + MinSlotGapCm);
+}
+
 float FAlgonaSquad::GetMoveAcceleration() const
 {
 	return CenterMoveSpeed / AccelerationSeconds;
@@ -72,6 +80,10 @@ void FAlgonaSquad::RebuildFormationLayout()
 		FormationParams.RowLength =
 			GetAlgonaDefaultRowLength(ActiveUnitIds.Num());
 	}
+
+	// Интервал строя следует за самым крупным Unit состава.
+	FormationParams.SlotSpacing = GetSlotSpacing();
+	FormationParams.RowSpacing = FormationParams.SlotSpacing;
 
 	BuildAlgonaFormationLayout(
 		FormationParams,

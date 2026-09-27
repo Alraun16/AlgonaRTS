@@ -130,6 +130,15 @@ public:
 	// Чтение состояния для локального интерфейса игрока (выбор, подсветка).
 	// Только чтение: изменения идут через очередь команд.
 
+	/** Радиус тела Unit, см; 0 — такого Unit нет. */
+	float GetUnitRadius(uint32 UnitId) const
+	{
+		const int32 UnitIndex = static_cast<int32>(UnitId) - 1;
+		return UnitState.Radii.IsValidIndex(UnitIndex)
+			? UnitState.Radii[UnitIndex]
+			: 0.0f;
+	}
+
 	/** Squad по SquadId или nullptr. */
 	const FAlgonaSquad* FindSquad(int32 SquadId) const
 	{
@@ -268,6 +277,11 @@ private:
 		TArray<int32> SquadIds;
 		TArray<int32> SlotIndices;
 
+		// Размер Unit: радиус тела (L3, круги выбора, выбор мышью) и масштаб
+		// меша для Presentation. Разные типы существ различаются ими.
+		TArray<float> Radii;
+		TArray<float> MeshScales;
+
 		// Рабочие данные текущего тика.
 		// Желаемая скорость — результат L2. На шаге инерции между ней и
 		// фактической скоростью появится ограничение ускорения.
@@ -314,7 +328,6 @@ private:
 		float YawRate = 0.0f;
 		float FacingYaw = 0.0f;
 		float UnitAcceleration = 0.0f;
-		float UnitRadius = 0.0f;
 		bool bLocalAvoidance = false;
 		bool bUnitsFaceMovement = false;
 		float UnitMaxSpeed = 0.0f;

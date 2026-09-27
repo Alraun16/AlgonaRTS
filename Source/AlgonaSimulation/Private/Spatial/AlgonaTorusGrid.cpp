@@ -39,15 +39,15 @@ void FAlgonaTorusGrid::RebuildFromPoints(
 	float InCellSize,
 	TConstArrayView<int32> Indices,
 	TConstArrayView<FVector> Positions,
+	TConstArrayView<float> Radii,
 	bool bParallel)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaTorusGrid_RebuildFromPoints);
 
-	const int32 EntryCount = Indices.Num();
-	SetupBuckets(InCellSize, EntryCount);
+	const int32 ItemCount = Indices.Num();
+	SetupBuckets(InCellSize, ItemCount);
 
-	Entries.SetNumUninitialized(EntryCount, EAllowShrinking::No);
-	EntryBuckets.SetNumUninitialized(EntryCount, EAllowShrinking::No);
+	EntryBuckets.SetNumUninitialized(ItemCount, EAllowShrinking::No);
 
 	// В горячих циклах — обычные указатели: обращение к TArray по индексу
 	// в конфигурации Development проверяет границы на каждом элементе,
@@ -57,10 +57,47 @@ void FAlgonaTorusGrid::RebuildFromPoints(
 	uint32* EntryBucketData = EntryBuckets.GetData();
 	int32* CursorData = BucketWriteCursors.GetData();
 	int32* StartData = BucketStarts.GetData();
-	int32* EntryData = Entries.GetData();
 
-	// 1. Корзина каждого элемента. Проход не пишет в общие данные, поэтому
-	// выполняется в несколько потоков без атомарных операций.
+	// «Крупный» элемент — тот, чей радиус больше половины клетки: сосед
+	// обычного размера уже не нашёл бы его поиском вокруг себя по одному
+	// центру, поэтому крупный кладётся во все клетки, которые накрывает.
+	// Мелкие занимают ровно одну клетку, и их число записей не растёт.
+	const float LargeRadius = CellSize * 0.5f;
+	const float* RadiusData = Radii.IsEmpty() ? nullptr : Radii.GetData();
+
+	auto ForEachExtraCell = [this, PositionData, RadiusData, LargeRadius](
+		int32 Index,
+		auto&& Visit)
+	{
+		if (RadiusData == nullptr || RadiusData[Index] <= LargeRadius)
+		{
+			return;
+		}
+
+		const FVector& Position = PositionData[Index];
+		const float Extent = RadiusData[Index] - LargeRadius;
+
+		const int32 CenterCellX = GetCellCoordinate(Position.X);
+		const int32 CenterCellY = GetCellCoordinate(Position.Y);
+		const int32 FirstCellX = GetCellCoordinate(Position.X - Extent);
+		const int32 FirstCellY = GetCellCoordinate(Position.Y - Extent);
+		const int32 LastCellX = GetCellCoordinate(Position.X + Extent);
+		const int32 LastCellY = GetCellCoordinate(Position.Y + Extent);
+
+		for (int32 CellY = FirstCellY; CellY <= LastCellY; ++CellY)
+		{
+			for (int32 CellX = FirstCellX; CellX <= LastCellX; ++CellX)
+			{
+				if (CellX != CenterCellX || CellY != CenterCellY)
+				{
+					Visit(GetBucketIndex(CellX, CellY));
+				}
+			}
+		}
+	};
+
+	// 1. Корзина центра каждого элемента. Проход не пишет в общие данные,
+	// поэтому выполняется в несколько потоков без атомарных операций.
 	auto ComputeBucket = [this, IndexData, PositionData, EntryBucketData](int32 EntryIndex)
 	{
 		const FVector& Position = PositionData[IndexData[EntryIndex]];
@@ -73,13 +110,13 @@ void FAlgonaTorusGrid::RebuildFromPoints(
 	{
 		ParallelFor(
 			TEXT("AlgonaTorusGrid_Buckets"),
-			EntryCount,
+			ItemCount,
 			GridMinBatchSize,
 			ComputeBucket);
 	}
 	else
 	{
-		for (int32 EntryIndex = 0; EntryIndex < EntryCount; ++EntryIndex)
+		for (int32 EntryIndex = 0; EntryIndex < ItemCount; ++EntryIndex)
 		{
 			ComputeBucket(EntryIndex);
 		}
@@ -87,10 +124,22 @@ void FAlgonaTorusGrid::RebuildFromPoints(
 
 	// 2. Число записей в каждой корзине. Дальше всё в одном потоке: без
 	// атомарных операций и борьбы потоков за кэш это быстрее.
-	for (int32 EntryIndex = 0; EntryIndex < EntryCount; ++EntryIndex)
+	int32 EntryCount = 0;
+
+	for (int32 EntryIndex = 0; EntryIndex < ItemCount; ++EntryIndex)
 	{
 		++CursorData[EntryBucketData[EntryIndex]];
+		++EntryCount;
+
+		ForEachExtraCell(IndexData[EntryIndex], [&](uint32 Bucket)
+		{
+			++CursorData[Bucket];
+			++EntryCount;
+		});
 	}
+
+	Entries.SetNumUninitialized(EntryCount, EAllowShrinking::No);
+	int32* EntryData = Entries.GetData();
 
 	// 3. Префиксные суммы: где в Entries начинается каждая корзина.
 	const int32 BucketCount = GetBucketCount();
@@ -107,9 +156,15 @@ void FAlgonaTorusGrid::RebuildFromPoints(
 	StartData[BucketCount] = RunningStart;
 
 	// 4. Раскладка номеров по корзинам в порядке входного списка.
-	for (int32 EntryIndex = 0; EntryIndex < EntryCount; ++EntryIndex)
+	for (int32 EntryIndex = 0; EntryIndex < ItemCount; ++EntryIndex)
 	{
-		EntryData[CursorData[EntryBucketData[EntryIndex]]++] = IndexData[EntryIndex];
+		const int32 Index = IndexData[EntryIndex];
+		EntryData[CursorData[EntryBucketData[EntryIndex]]++] = Index;
+
+		ForEachExtraCell(Index, [&](uint32 Bucket)
+		{
+			EntryData[CursorData[Bucket]++] = Index;
+		});
 	}
 }
 

@@ -211,7 +211,7 @@ void AAlgonaLegacyIsmPresentationActor::RefreshPresentationWorkingSet(
 		NextTargetTransforms.Emplace(
 			(Snapshot.Facing * MeshFacingCorrection).GetNormalized(),
 			Snapshot.Position,
-			InstanceScale);
+			InstanceScale * Snapshot.MeshScale);
 	}
 
 	const bool bSameEntityOrder = HasSameEntityOrder(NextPresentedEntityIds);

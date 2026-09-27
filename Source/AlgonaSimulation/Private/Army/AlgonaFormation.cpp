@@ -223,9 +223,88 @@ void MirrorAlgonaFormationLayout(
 	Layout.FrontRowLocalX = FrontRowLocalX;
 }
 
+namespace
+{
+	// Раскладывает Unit группы по её слотам: ряды забирают передних Unit,
+	// внутри ряда — слева направо.
+	void AssignGroupSlotsByPosition(
+		const FAlgonaFormationLayout& Layout,
+		TConstArrayView<FVector2f> UnitLocalPositions,
+		TArrayView<int32> GroupUnits,
+		TArrayView<int32> GroupSlots,
+		TArray<int32>& OutSlotForUnit)
+	{
+		const int32 Count = FMath::Min(GroupUnits.Num(), GroupSlots.Num());
+		if (Count == 0)
+		{
+			return;
+		}
+
+		// Unit по глубине: передние первыми. Одинаковая глубина — слева
+		// направо, дальше по номеру: результат не зависит от порядка обхода.
+		GroupUnits.Sort([&UnitLocalPositions](int32 A, int32 B)
+		{
+			const FVector2f& PositionA = UnitLocalPositions[A];
+			const FVector2f& PositionB = UnitLocalPositions[B];
+
+			if (PositionA.X != PositionB.X)
+			{
+				return PositionA.X > PositionB.X;
+			}
+			return PositionA.Y != PositionB.Y ? PositionA.Y < PositionB.Y : A < B;
+		});
+
+		// Слоты группы: ряды спереди назад, внутри ряда слева направо.
+		GroupSlots.Sort([&Layout](int32 A, int32 B)
+		{
+			const FAlgonaFormationSlot& SlotA = Layout.Slots[A];
+			const FAlgonaFormationSlot& SlotB = Layout.Slots[B];
+
+			if (SlotA.RowIndex != SlotB.RowIndex)
+			{
+				return SlotA.RowIndex < SlotB.RowIndex;
+			}
+			return SlotA.LocalOffset.Y != SlotB.LocalOffset.Y
+				? SlotA.LocalOffset.Y < SlotB.LocalOffset.Y
+				: A < B;
+		});
+
+		// Ряд за рядом: сколько слотов группы в ряду, столько передних Unit
+		// он и забирает; внутри ряда Unit пересортировываются слева направо.
+		int32 RowStart = 0;
+
+		while (RowStart < Count)
+		{
+			const int32 RowIndex = Layout.Slots[GroupSlots[RowStart]].RowIndex;
+			int32 RowEnd = RowStart;
+			while (RowEnd < Count
+				&& Layout.Slots[GroupSlots[RowEnd]].RowIndex == RowIndex)
+			{
+				++RowEnd;
+			}
+
+			TArrayView<int32> RowUnits(GroupUnits.GetData() + RowStart, RowEnd - RowStart);
+			RowUnits.Sort([&UnitLocalPositions](int32 A, int32 B)
+			{
+				const float LateralA = UnitLocalPositions[A].Y;
+				const float LateralB = UnitLocalPositions[B].Y;
+				return LateralA != LateralB ? LateralA < LateralB : A < B;
+			});
+
+			for (int32 Index = RowStart; Index < RowEnd; ++Index)
+			{
+				OutSlotForUnit[GroupUnits[Index]] = GroupSlots[Index];
+			}
+
+			RowStart = RowEnd;
+		}
+	}
+}
+
 void BuildAlgonaSlotAssignmentByPosition(
 	const FAlgonaFormationLayout& Layout,
 	TConstArrayView<FVector2f> UnitLocalPositions,
+	TConstArrayView<float> UnitRadii,
 	TArray<int32>& OutSlotForUnit)
 {
 	const int32 UnitCount = UnitLocalPositions.Num();
@@ -236,8 +315,9 @@ void BuildAlgonaSlotAssignmentByPosition(
 		return;
 	}
 
-	// 1. Unit по глубине: передние первыми. Одинаковая глубина — слева
-	// направо, дальше по номеру: результат не зависит от порядка обхода.
+	// 1. Структура: Unit по убыванию размера получают слоты по порядку
+	// раскладки — ряды спереди назад, внутри ряда от центра к краям.
+	// Крупные встают в первую строку по центру.
 	TArray<int32> UnitOrder;
 	UnitOrder.Reserve(UnitCount);
 	for (int32 UnitOrderIndex = 0; UnitOrderIndex < UnitCount; ++UnitOrderIndex)
@@ -245,19 +325,16 @@ void BuildAlgonaSlotAssignmentByPosition(
 		UnitOrder.Add(UnitOrderIndex);
 	}
 
-	UnitOrder.Sort([&UnitLocalPositions](int32 A, int32 B)
+	const bool bMixedSizes = UnitRadii.Num() == UnitCount;
+
+	if (bMixedSizes)
 	{
-		const FVector2f& PositionA = UnitLocalPositions[A];
-		const FVector2f& PositionB = UnitLocalPositions[B];
-
-		if (PositionA.X != PositionB.X)
+		UnitOrder.Sort([&UnitRadii](int32 A, int32 B)
 		{
-			return PositionA.X > PositionB.X;
-		}
-		return PositionA.Y != PositionB.Y ? PositionA.Y < PositionB.Y : A < B;
-	});
+			return UnitRadii[A] != UnitRadii[B] ? UnitRadii[A] > UnitRadii[B] : A < B;
+		});
+	}
 
-	// 2. Слоты по рядам: ряды спереди назад, внутри ряда слева направо.
 	TArray<int32> SlotOrder;
 	SlotOrder.Reserve(UnitCount);
 	for (int32 SlotIndex = 0; SlotIndex < UnitCount; ++SlotIndex)
@@ -265,47 +342,31 @@ void BuildAlgonaSlotAssignmentByPosition(
 		SlotOrder.Add(SlotIndex);
 	}
 
-	SlotOrder.Sort([&Layout](int32 A, int32 B)
+	// 2. Расстояние: внутри группы одного размера Unit раскладываются по
+	// ближайшим слотам этой группы.
+	int32 GroupStart = 0;
+
+	while (GroupStart < UnitCount)
 	{
-		const FAlgonaFormationSlot& SlotA = Layout.Slots[A];
-		const FAlgonaFormationSlot& SlotB = Layout.Slots[B];
+		int32 GroupEnd = UnitCount;
 
-		if (SlotA.RowIndex != SlotB.RowIndex)
+		if (bMixedSizes)
 		{
-			return SlotA.RowIndex < SlotB.RowIndex;
-		}
-		return SlotA.LocalOffset.Y != SlotB.LocalOffset.Y
-			? SlotA.LocalOffset.Y < SlotB.LocalOffset.Y
-			: A < B;
-	});
-
-	// 3. Ряд за рядом: сколько слотов в ряду, столько передних Unit он и
-	// забирает. Внутри ряда Unit пересортировываются слева направо, чтобы
-	// левый достался левому слоту.
-	int32 RowStart = 0;
-
-	while (RowStart < UnitCount)
-	{
-		const int32 RowIndex = Layout.Slots[SlotOrder[RowStart]].RowIndex;
-		int32 RowEnd = RowStart;
-		while (RowEnd < UnitCount && Layout.Slots[SlotOrder[RowEnd]].RowIndex == RowIndex)
-		{
-			++RowEnd;
+			GroupEnd = GroupStart + 1;
+			while (GroupEnd < UnitCount
+				&& UnitRadii[UnitOrder[GroupEnd]] == UnitRadii[UnitOrder[GroupStart]])
+			{
+				++GroupEnd;
+			}
 		}
 
-		TArrayView<int32> RowUnits(UnitOrder.GetData() + RowStart, RowEnd - RowStart);
-		RowUnits.Sort([&UnitLocalPositions](int32 A, int32 B)
-		{
-			const float LateralA = UnitLocalPositions[A].Y;
-			const float LateralB = UnitLocalPositions[B].Y;
-			return LateralA != LateralB ? LateralA < LateralB : A < B;
-		});
+		AssignGroupSlotsByPosition(
+			Layout,
+			UnitLocalPositions,
+			TArrayView<int32>(UnitOrder.GetData() + GroupStart, GroupEnd - GroupStart),
+			TArrayView<int32>(SlotOrder.GetData() + GroupStart, GroupEnd - GroupStart),
+			OutSlotForUnit);
 
-		for (int32 Index = RowStart; Index < RowEnd; ++Index)
-		{
-			OutSlotForUnit[UnitOrder[Index]] = SlotOrder[Index];
-		}
-
-		RowStart = RowEnd;
+		GroupStart = GroupEnd;
 	}
 }

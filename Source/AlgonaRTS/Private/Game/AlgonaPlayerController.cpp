@@ -55,14 +55,14 @@ namespace
 			|| Controller.IsInputKeyDown(EKeys::RightShift);
 	}
 
-	double GetUnitPickRadius(const FAlgonaSquad& Squad)
+	double GetUnitPickRadius(const FAlgonaSquad& Squad, double UnitRadius)
 	{
 		const double Spacing = FMath::Max(
 			Squad.FormationParams.SlotSpacing,
 			Squad.FormationParams.RowSpacing);
 
 		return FMath::Clamp(
-			FMath::Max(static_cast<double>(Squad.UnitRadius), Spacing * PickRadiusSpacingFactor),
+			FMath::Max(UnitRadius, Spacing * PickRadiusSpacingFactor),
 			MinPickRadius,
 			MaxPickRadius);
 	}
@@ -426,7 +426,7 @@ int32 AAlgonaPlayerController::PickSquadUnderCursor() const
 				RayOrigin,
 				RayDirection,
 				UnitPosition,
-				GetUnitPickRadius(*Squad),
+				GetUnitPickRadius(*Squad, Simulation->GetUnitRadius(UnitId)),
 				UnitPickHeight,
 				HitT)
 			&& HitT < NearestT)
@@ -511,7 +511,7 @@ void AAlgonaPlayerController::CollectSquadsInScreenBox(
 					ViewProjectionMatrix,
 					HeadScreen)
 				|| !FSceneView::ProjectWorldToScreen(
-					UnitPosition + CameraRight * Squad->UnitRadius,
+					UnitPosition + CameraRight * Simulation->GetUnitRadius(UnitId),
 					ViewRect,
 					ViewProjectionMatrix,
 					SideScreen))
@@ -558,18 +558,17 @@ void AAlgonaPlayerController::UpdateSelectionRings()
 				continue;
 			}
 
-			const FVector RingScale = AAlgonaSelectionPresentationActor::GetRingScale(
-				Squad->UnitRadius * SelectionRingRadiusScale);
-
 			for (const uint32 UnitId : Squad->ActiveUnitIds)
 			{
 				FVector UnitPosition;
 				if (Simulation->GetUnitPosition(UnitId, UnitPosition))
 				{
+					// Круг под каждым Unit по его собственному радиусу.
 					RingTransforms.Emplace(
 						FQuat::Identity,
 						UnitPosition + FVector(0.0, 0.0, SelectionRingHeightOffset),
-						RingScale);
+						AAlgonaSelectionPresentationActor::GetRingScale(
+							Simulation->GetUnitRadius(UnitId) * SelectionRingRadiusScale));
 				}
 			}
 		}
@@ -592,16 +591,24 @@ void AAlgonaPlayerController::UpdateSelectionRings()
 			OrderSquad->ActiveUnitIds.Num(),
 			PreviewLayout);
 
-		const FVector RingScale = AAlgonaSelectionPresentationActor::GetRingScale(
-			OrderSquad->UnitRadius * SelectionRingRadiusScale);
-
-		for (const FAlgonaFormationSlot& Slot : PreviewLayout.Slots)
+		// Радиус круга — у каждого Unit свой: в смешанном отряде крупные
+		// занимают передние слоты. Номер слота в предпросмотре тот же, что
+		// и в текущем составе.
+		for (int32 SlotIndex = 0; SlotIndex < PreviewLayout.Slots.Num(); ++SlotIndex)
 		{
+			const double UnitRadius = OrderSquad->ActiveUnitIds.IsValidIndex(SlotIndex)
+				? Simulation->GetUnitRadius(OrderSquad->ActiveUnitIds[SlotIndex])
+				: OrderSquad->UnitRadius;
+
 			RingTransforms.Emplace(
 				FQuat::Identity,
-				GetAlgonaSlotWorldLocation(OrderTarget, OrderForward, Slot.LocalOffset)
+				GetAlgonaSlotWorldLocation(
+					OrderTarget,
+					OrderForward,
+					PreviewLayout.Slots[SlotIndex].LocalOffset)
 					+ FVector(0.0, 0.0, SelectionRingHeightOffset),
-				RingScale);
+				AAlgonaSelectionPresentationActor::GetRingScale(
+					UnitRadius * SelectionRingRadiusScale));
 		}
 	}
 
@@ -865,7 +872,7 @@ void AAlgonaPlayerController::GetOrderTargetMarkers(
 
 		// Отметка со стрелками вписана в круг в полтора раза шире
 		// круга выбора под Unit.
-		Marker.Radius = Squad->UnitRadius
+		Marker.Radius = Squad->MaxUnitRadius
 			* SelectionRingRadiusScale
 			* OrderMarkerRadiusScale;
 	}

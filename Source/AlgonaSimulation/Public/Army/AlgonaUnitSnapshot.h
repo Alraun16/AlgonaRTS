@@ -12,4 +12,7 @@ struct ALGONASIMULATION_API FAlgonaUnitSnapshot
 	uint32 EntityId = 0;
 	FVector Position = FVector::ZeroVector;
 	FQuat Facing = FQuat::Identity;
+
+	// Масштаб меша: крупные существа больше обычных.
+	float MeshScale = 1.0f;
 };

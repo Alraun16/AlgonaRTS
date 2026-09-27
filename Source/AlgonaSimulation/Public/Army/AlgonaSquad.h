@@ -37,6 +37,9 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	/** Направление «вперёд» на плоскости; ForwardVector, если оно не задано. */
 	FVector GetForwardDirection2D() const;
 
+	/** Интервал строя под самого крупного Unit состава, см. */
+	float GetSlotSpacing() const;
+
 	/** Ускорение центра Squad, см/с²: полная скорость за AccelerationSeconds. */
 	float GetMoveAcceleration() const;
 
@@ -107,9 +110,13 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	// Активные Unit по слотам: ActiveUnitIds[SlotIndex] = UnitId.
 	TArray<uint32> ActiveUnitIds;
 
-	// Радиус Unit («размер» Unit), см: круги выбора, позже — локальное избегание L3.
-	// Пока один на Squad; у разных типов существ (лучник, тролль) будет свой.
-	float UnitRadius = 35.0f;
+	// Радиус Unit по умолчанию, см: с ним создаются новые Unit Squad.
+	// Настоящий радиус каждого Unit хранится в массивах Simulation.
+	float UnitRadius = DefaultUnitRadiusCm;
+
+	// Наибольший радиус среди Unit состава: от него зависит интервал строя,
+	// иначе крупные стояли бы внутри друг друга. Считается в сводке Squad.
+	float MaxUnitRadius = DefaultUnitRadiusCm;
 
 	// Скорость центра за последний тик — упреждение для L2; ноль, если Squad стоит.
 	FVector CenterVelocity = FVector::ZeroVector;
@@ -204,6 +211,12 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	// направлению. 1.0 — доворот заканчивается ровно в цели, меньше —
 	// Squad доворачивает позже и заканчивает уже на месте.
 	static constexpr double FinalTurnDistanceFactor = 0.8;
+
+	// Интервал строя по умолчанию и минимальный просвет между телами
+	// соседей, см: у крупных существ интервал растёт от их радиуса.
+	static constexpr float DefaultUnitRadiusCm = 35.0f;
+	static constexpr float DefaultSlotSpacingCm = 150.0f;
+	static constexpr float MinSlotGapCm = 60.0f;
 
 	// Длительность плавного старта после зеркального разворота, с. Это не
 	// второй разгон, а потолок скорости, пока Unit разворачиваются на месте.
