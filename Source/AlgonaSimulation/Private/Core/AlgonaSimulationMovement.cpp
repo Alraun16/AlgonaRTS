@@ -163,16 +163,17 @@ namespace
 	}
 
 	// Клетка сетки соседей — около интервала строя: в строю обычно один Unit
-	// в клетке. Обход смотрит на 5×5 клеток, то есть видит соседей в 300 см.
+	// в клетке. Дальше одной клетки (3×3) Unit смотрит, только когда успеет
+	// пройти это расстояние до столкновения: на полном ходу это 5×5 клеток,
+	// а в давке, где все заторможены, хватает 3×3 — и кандидатов втрое меньше.
 	constexpr float LocalAvoidanceCellSizeCm = 150.0f;
-	constexpr int32 AvoidanceRings = 2;
-	constexpr float AvoidanceQueryRadius =
-		AvoidanceRings * LocalAvoidanceCellSizeCm;
+	constexpr int32 AvoidanceMaxRings = 2;
 
 	// Отбор участников L3: крупная сетка Squad и запас к их границам —
 	// дальность обзора обхода плюс путь Unit за тик.
 	constexpr float SquadBroadphaseCellSizeCm = 2000.0f;
-	constexpr float SquadBroadphaseMarginCm = AvoidanceQueryRadius + 50.0f;
+	constexpr float SquadBroadphaseMarginCm =
+		AvoidanceMaxRings * LocalAvoidanceCellSizeCm + 50.0f;
 
 	// Сколько тиков после Reform Squad остаётся участником L3: при
 	// перестроении Unit идут через чужие слоты и могут пройти насквозь.
@@ -226,6 +227,7 @@ namespace
 	// Теснота Squad = средняя теснота (торможение) его Unit, усиленная:
 	// заторможены обычно только передние ряды.
 	constexpr float SquadCongestionGain = 1.5f;
+
 
 	// Минимальная порция Unit на одну задачу рабочего потока: на более мелких
 	// порциях раздача задач потокам стоит дороже самого расчёта.
@@ -361,6 +363,10 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 	const float SlotDeadZone = CVarAlgonaP2SlotDeadZone.GetValueOnGameThread();
 	const float SlotReturnTime = CVarAlgonaP2SlotReturnTime.GetValueOnGameThread();
 
+	// Чередование половин Unit по номеру: в чётный тик пересчитывают одни,
+	// в нечётный другие.
+	const int32 AvoidanceTickPhase = static_cast<int32>(SimulationTick & 1);
+
 	const bool bAvoidance =
 		CVarAlgonaP2Avoidance.GetValueOnGameThread() != 0
 		&& CVarAlgonaP2LocalAvoidanceGrid.GetValueOnGameThread() != 0
@@ -480,6 +486,13 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 		// Уклоняются обе стороны: идущий и стоящий, на которого надвигаются.
 		if (bAvoidance && Frame.bLocalAvoidance)
 		{
+			// Решение об обходе пересчитывается через тик: горизонт реакции
+			// 0.8 с, и задержка в 25 мс на нём незаметна, а работы вдвое
+			// меньше. Половины Unit чередуются по номеру, поэтому нагрузка
+			// на тик ровная. В промежуточный тик действует прошлое решение —
+			// оно и так сглаживается между тиками.
+			if (((UnitIndex + AvoidanceTickPhase) & 1) == 0)
+			{
 			// Скорость намерения, а не фактическая: иначе собственное
 			// торможение уменьшает угрозу, угроза отпускает тормоз, и Unit
 			// дрожит в такт тикам.
@@ -499,10 +512,16 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 			FAvoidanceThreat Threats[MaxAvoidanceThreats];
 			int32 ThreatCount = 0;
 
-			// Идущий смотрит дальше (5×5 клеток, 300 см), стоящий — только
-			// на тех, кто уже рядом (3×3, 150 см): так дешевле, а идущий к этому
-			// моменту уже сам начал уклоняться.
-			const int32 QueryRings = bMoving ? AvoidanceRings : 1;
+			// Дальность обзора по скорости: сколько Unit пройдёт за горизонт
+			// реакции. Стоящий смотрит на 3×3 — до него самого доберутся
+			// идущие, которые уже уклоняются.
+			const float LookaheadDistance = IntentVelocity.Size() * AvoidanceHorizon;
+			const int32 QueryRings = FMath::Clamp(
+				FMath::CeilToInt32(LookaheadDistance / LocalAvoidanceCellSizeCm),
+				1,
+				AvoidanceMaxRings);
+
+			const float AvoidanceQueryRadius = QueryRings * LocalAvoidanceCellSizeCm;
 
 			LocalAvoidanceGrid.ForEachCandidate(Position, QueryRings, [&](int32 OtherIndex)
 			{
@@ -753,6 +772,11 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 			// плавно, а не рывком.
 			Dodge = FMath::Lerp(DodgeData[UnitIndex], Dodge, 1.0f - AvoidanceDodgeSmoothing);
 			DodgeData[UnitIndex] = Dodge;
+			}
+
+			// Решение этого или прошлого тика применяется одинаково.
+			const float Brake = BrakeData[UnitIndex];
+			const FVector2f Dodge = DodgeData[UnitIndex];
 
 			if (Brake > 0.0f || !Dodge.IsNearlyZero())
 			{
@@ -768,6 +792,12 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 					: AvoidanceFacingSpeed;
 				bAvoidanceFacing = Dodge.SizeSquared() > FMath::Square(FacingThreshold);
 			}
+		}
+		else
+		{
+			// Unit вне L3: прошлое решение не должно действовать дальше.
+			BrakeData[UnitIndex] = 0.0f;
+			DodgeData[UnitIndex] = FVector2f::ZeroVector;
 		}
 
 		DesiredData[UnitIndex] = Desired;

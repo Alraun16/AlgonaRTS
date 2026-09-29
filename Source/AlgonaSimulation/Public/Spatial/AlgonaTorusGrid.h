@@ -148,7 +148,7 @@ private:
 		int32 FirstCellY,
 		int32 CellCountX,
 		int32 CellCountY,
-		FunctorType& Visitor) const
+		FunctorType&& Visitor) const
 	{
 		const uint32 RowCellCount = static_cast<uint32>(
 			FMath::Min(CellCountX, static_cast<int32>(BucketsXMask) + 1));

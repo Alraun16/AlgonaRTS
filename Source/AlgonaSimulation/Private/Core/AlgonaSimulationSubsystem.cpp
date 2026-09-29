@@ -86,6 +86,32 @@ namespace
 		}
 	}
 
+	void StressMarchCommand(
+		const TArray<FString>& Arguments,
+		UWorld* World)
+	{
+		if (!World || Arguments.IsEmpty())
+		{
+			return;
+		}
+
+		UAlgonaSimulationSubsystem* Simulation =
+			World->GetSubsystem<UAlgonaSimulationSubsystem>();
+
+		if (Simulation)
+		{
+			Simulation->SetStressMarchEnabled(
+				FCString::Atoi(*Arguments[0]) != 0);
+		}
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs GAlgonaP2StressMarchCommand(
+		TEXT("algona.P2.StressMarch"),
+		TEXT("P2 measurement scenario: 1 marches all squads back and forth in the same direction (no collisions), 0 stops issuing new orders."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(
+			&StressMarchCommand),
+		ECVF_Cheat);
+
 	FAutoConsoleCommandWithWorldAndArgs GAlgonaP2StressMoveCommand(
 		TEXT("algona.P2.StressMove"),
 		TEXT("P2 measurement scenario: 1 keeps all squads moving through neighbouring rows, 0 stops issuing new orders."),
@@ -277,7 +303,7 @@ void UAlgonaSimulationSubsystem::Tick(float DeltaTime)
 	Metrics.OverloadedFrameCount =
 		FixedStepAccumulator.GetOverloadedFrameCount();
 
-	UpdateMetricsReport(Metrics.LastExecutedStepsThisFrame);
+	UpdateMetricsReport(Metrics.LastExecutedStepsThisFrame, DeltaTime);
 }
 
 TStatId UAlgonaSimulationSubsystem::GetStatId() const
@@ -418,6 +444,7 @@ void UAlgonaSimulationSubsystem::SetStressMoveEnabled(bool bEnabled)
 	}
 
 	bStressMoveEnabled = bEnabled && !Squads.IsEmpty();
+	bStressMarchEnabled = false;
 	StressMoveDirections.Reset();
 
 	if (bStressMoveEnabled)
@@ -442,6 +469,33 @@ void UAlgonaSimulationSubsystem::SetStressMoveEnabled(bool bEnabled)
 		LogAlgonaSimulation,
 		Display,
 		TEXT("[P2 StressMove] %s squads=%d distance=%.0f cm"),
+		bStressMoveEnabled ? TEXT("ON") : TEXT("OFF"),
+		Squads.Num(),
+		AlgonaSimulationDefaults::StressMoveDistanceCm);
+}
+
+void UAlgonaSimulationSubsystem::SetStressMarchEnabled(bool bEnabled)
+{
+	if (!IsAuthoritativeSimulationWorld())
+	{
+		return;
+	}
+
+	bStressMoveEnabled = bEnabled && !Squads.IsEmpty();
+	bStressMarchEnabled = bStressMoveEnabled;
+	StressMoveDirections.Reset();
+
+	if (bStressMoveEnabled)
+	{
+		// Все отряды идут в одну сторону и возвращаются обратно: строй
+		// движется, но отряды друг с другом не встречаются.
+		StressMoveDirections.Init(1, Squads.Num());
+	}
+
+	UE_LOG(
+		LogAlgonaSimulation,
+		Display,
+		TEXT("[P2 StressMarch] %s squads=%d distance=%.0f cm"),
 		bStressMoveEnabled ? TEXT("ON") : TEXT("OFF"),
 		Squads.Num(),
 		AlgonaSimulationDefaults::StressMoveDistanceCm);
@@ -499,7 +553,8 @@ void UAlgonaSimulationSubsystem::AccumulateMetricsReportStep()
 }
 
 void UAlgonaSimulationSubsystem::UpdateMetricsReport(
-	int32 ExecutedStepsThisFrame)
+	int32 ExecutedStepsThisFrame,
+	float FrameDeltaTime)
 {
 	const double ReportSeconds = static_cast<double>(
 		CVarAlgonaP2MetricsReportSeconds.GetValueOnGameThread());
@@ -530,6 +585,11 @@ void UAlgonaSimulationSubsystem::UpdateMetricsReport(
 		return;
 	}
 
+	++Window.FrameCount;
+	Window.MaxFrameMilliseconds = FMath::Max(
+		Window.MaxFrameMilliseconds,
+		static_cast<double>(FrameDeltaTime) * 1000.0);
+
 	Window.MaxStepsPerFrame = FMath::Max(
 		Window.MaxStepsPerFrame,
 		ExecutedStepsThisFrame);
@@ -549,7 +609,7 @@ void UAlgonaSimulationSubsystem::UpdateMetricsReport(
 	UE_LOG(
 		LogAlgonaSimulation,
 		Display,
-		TEXT("[P2 Metrics] units=%d window=%.2fs steps=%d (%.1f Hz) maxSteps/frame=%d | step avg=%.2f max=%.2f ms | commands=%.2f squads=%.2f steer=%.2f l3grid=%.2f l3=%.2f grid=%.2f ms | changed avg=%lld | backlog=%.3fs overloaded+=%llu | parallel=%s workers=%d | stress=%s"),
+		TEXT("[P2 Metrics] units=%d window=%.2fs steps=%d (%.1f Hz) maxSteps/frame=%d | step avg=%.2f max=%.2f ms | commands=%.2f squads=%.2f steer=%.2f l3grid=%.2f l3=%.2f grid=%.2f ms | fps avg=%.0f worst=%.0f | changed avg=%lld | backlog=%.3fs overloaded+=%llu | parallel=%s workers=%d | stress=%s"),
 		UnitEntities.Num(),
 		WindowSeconds,
 		Window.StepCount,
@@ -563,6 +623,10 @@ void UAlgonaSimulationSubsystem::UpdateMetricsReport(
 		Window.LocalGridMillisecondsSum * InverseStepCount,
 		Window.SeparationMillisecondsSum * InverseStepCount,
 		Window.UnitGridMillisecondsSum * InverseStepCount,
+		static_cast<double>(Window.FrameCount) / WindowSeconds,
+		Window.MaxFrameMilliseconds > 0.0
+			? 1000.0 / Window.MaxFrameMilliseconds
+			: 0.0,
 		static_cast<long long>(
 			static_cast<double>(Window.MovedEntitiesSum) * InverseStepCount),
 		FixedStepAccumulator.GetBacklogSeconds(),
@@ -571,7 +635,9 @@ void UAlgonaSimulationSubsystem::UpdateMetricsReport(
 				- Window.StartOverloadedFrameCount),
 		Metrics.bLastParallelMovement ? TEXT("ON") : TEXT("OFF"),
 		FTaskGraphInterface::Get().GetNumWorkerThreads(),
-		bStressMoveEnabled ? TEXT("ON") : TEXT("OFF"));
+		bStressMoveEnabled
+			? (bStressMarchEnabled ? TEXT("MARCH") : TEXT("ON"))
+			: TEXT("OFF"));
 
 	StartWindow();
 }

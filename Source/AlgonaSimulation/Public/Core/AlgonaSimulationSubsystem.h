@@ -22,7 +22,12 @@ ALGONASIMULATION_API DECLARE_LOG_CATEGORY_EXTERN(LogAlgonaSimulation, Log, All);
 namespace AlgonaSimulationDefaults
 {
 	inline constexpr double FixedStepSeconds = 1.0 / 40.0;
-	inline constexpr int32 MaxStepsPerFrame = 5;
+	// Сколько шагов симуляции разрешено прогнать в одном кадре, догоняя
+	// отставание. Больше — симуляция точнее держит реальное время, но в
+	// тяжёлой сцене кадр считает несколько шагов подряд и кадры проседают.
+	// Два: при перегрузке симуляция идёт чуть медленнее реального времени,
+	// зато картинка остаётся плавной.
+	inline constexpr int32 MaxStepsPerFrame = 2;
 	inline constexpr int32 UnitCount = 20000;
 	inline constexpr int32 SquadSize = 50;
 	inline constexpr double SpatialGridCellSizeCm = 10000.0;
@@ -244,6 +249,12 @@ public:
 	 */
 	void SetStressMoveEnabled(bool bEnabled);
 
+	/**
+	 * То же, но все Squad идут в одну сторону и возвращаются обратно, не
+	 * сталкиваясь: замер марша больших армий без столкновений.
+	 */
+	void SetStressMarchEnabled(bool bEnabled);
+
 private:
 	// Накопленная статистика шагов за одно окно реального времени.
 	// Используется только для периодического отчёта в лог.
@@ -253,6 +264,11 @@ private:
 		uint64 StartOverloadedFrameCount = 0;
 		int32 StepCount = 0;
 		int32 MaxStepsPerFrame = 0;
+
+		// Кадры игры за окно: средний FPS и худший кадр. По экранному
+		// счётчику судить трудно — он скачет несколько раз в секунду.
+		int32 FrameCount = 0;
+		double MaxFrameMilliseconds = 0.0;
 		double StepMillisecondsSum = 0.0;
 		double StepMillisecondsMax = 0.0;
 		double CommandsMillisecondsSum = 0.0;
@@ -298,6 +314,7 @@ private:
 
 		// 1 — Unit заметно уклоняется и должен смотреть по ходу, а не идти боком.
 		TArray<uint8> AvoidanceFacingFlags;
+
 
 		// L3: скорость расталкивания за этот тик. Добавляется к движению
 		// поверх инерции: толчок действует сразу, а не разгоняется.
@@ -375,6 +392,7 @@ private:
 	// L3: перестройка мелкой сетки по позициям Unit после L2.
 	void BuildLocalAvoidanceGrid(bool bParallel);
 
+
 	// L3: расталкивание реально перекрывшихся Unit (контакт).
 	void SeparateUnits(float DeltaTime, bool bParallel);
 
@@ -413,7 +431,7 @@ private:
 	void SubmitStressMoveCommands();
 
 	void AccumulateMetricsReportStep();
-	void UpdateMetricsReport(int32 ExecutedStepsThisFrame);
+	void UpdateMetricsReport(int32 ExecutedStepsThisFrame, float FrameDeltaTime);
 
 	FAlgonaFixedStepAccumulator FixedStepAccumulator{
 		AlgonaSimulationDefaults::FixedStepSeconds,
@@ -465,5 +483,8 @@ private:
 	// Состояние стресс-сценария: направление следующего прохода по Y
 	// (+1 или -1) для каждого SquadId.
 	bool bStressMoveEnabled = false;
+
+	// Марш: все Squad идут в одну сторону, столкновений нет.
+	bool bStressMarchEnabled = false;
 	TArray<int8> StressMoveDirections;
 };
