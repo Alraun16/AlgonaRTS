@@ -5,6 +5,8 @@
 #include "Presentation/AlgonaSelectionPresentationActor.h"
 
 #include "Camera/PlayerCameraManager.h"
+#include "DrawDebugHelpers.h"
+#include "HAL/IConsoleManager.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
@@ -34,6 +36,17 @@ namespace
 	// Отметка точки приказа вписана в круг в полтора раза шире круга выбора.
 	constexpr double OrderMarkerRadiusScale = 1.5;
 	constexpr double SelectionRingHeightOffset = 3.0;
+
+	// Отладка путей: линии пути центра выбранных Squad.
+	TAutoConsoleVariable<int32> CVarAlgonaP2DebugPath(
+		TEXT("algona.P2.DebugPath"),
+		0,
+		TEXT("1 = draw navigation paths of the selected squads, 2 = also draw the corridor gates of the last built path."),
+		ECVF_Cheat);
+
+	// Высота линий пути над землёй и размер отметки точки пути, см.
+	constexpr double DebugPathHeightOffset = 40.0;
+	constexpr float DebugPathPointSize = 30.0f;
 
 	// Мёртвая зона ПКМ, пиксели: пока курсор ближе к точке нажатия,
 	// это клик, и угол курсора вокруг цели ещё неустойчив.
@@ -229,6 +242,7 @@ void AAlgonaPlayerController::PlayerTick(float DeltaTime)
 	UpdateSelectionInput();
 	UpdateOrderInput();
 	UpdateSelectionRings();
+	DrawSelectedSquadPaths();
 }
 
 void AAlgonaPlayerController::UpdateCameraInput(float DeltaTime)
@@ -843,6 +857,65 @@ bool AAlgonaPlayerController::GetOrderPreviewArrow(
 bool AAlgonaPlayerController::ShouldShowSingleSquadOnlyMessage() const
 {
 	return bRightMousePressed && bOrderDragged && SelectedSquadIds.Num() > 1;
+}
+
+void AAlgonaPlayerController::DrawSelectedSquadPaths() const
+{
+	UWorld* World = GetWorld();
+	const UAlgonaSimulationSubsystem* Simulation =
+		World ? World->GetSubsystem<UAlgonaSimulationSubsystem>() : nullptr;
+
+	if (!Simulation || CVarAlgonaP2DebugPath.GetValueOnGameThread() == 0)
+	{
+		return;
+	}
+
+	const FVector HeightOffset(0.0, 0.0, DebugPathHeightOffset);
+
+	// Ворота коридора последнего построенного пути: по ним видно, насколько
+	// широкий проход был у пути в каждом месте.
+	if (CVarAlgonaP2DebugPath.GetValueOnGameThread() >= 2)
+	{
+		const TArray<FVector>& Portals = Simulation->GetDebugPathPortals();
+
+		for (int32 PointIndex = 0; PointIndex + 1 < Portals.Num(); PointIndex += 2)
+		{
+			DrawDebugLine(
+				World,
+				Portals[PointIndex] + HeightOffset,
+				Portals[PointIndex + 1] + HeightOffset,
+				FColor::Red,
+				false,
+				-1.0f,
+				0,
+				2.0f);
+		}
+	}
+
+	for (const int32 SquadId : SelectedSquadIds)
+	{
+		const FAlgonaSquad* Squad = Simulation->FindSquad(SquadId);
+
+		if (!Squad || !Squad->bHasMoveTarget || Squad->PathPoints.IsEmpty())
+		{
+			continue;
+		}
+
+		// Линия от центра Squad по точкам пути; пройденные точки не рисуются.
+		FVector Previous = Squad->CenterLocation + HeightOffset;
+
+		for (int32 PointIndex = FMath::Max(Squad->PathPointIndex, 0);
+			PointIndex < Squad->PathPoints.Num();
+			++PointIndex)
+		{
+			const FVector Point = Squad->PathPoints[PointIndex] + HeightOffset;
+
+			DrawDebugLine(World, Previous, Point, FColor::Green, false, -1.0f, 0, 3.0f);
+			DrawDebugPoint(World, Point, DebugPathPointSize, FColor::Yellow, false, -1.0f);
+
+			Previous = Point;
+		}
+	}
 }
 
 void AAlgonaPlayerController::GetOrderTargetMarkers(

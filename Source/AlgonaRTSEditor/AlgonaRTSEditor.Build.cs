@@ -16,6 +16,8 @@ public class AlgonaRTSEditor : ModuleRules
 			"UnrealEd",
 			"MaterialEditor",
 			"AssetRegistry",
+			"NavigationSystem",
+			"BSPUtils",
 			"AlgonaRTS"
 		});
 	}

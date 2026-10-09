@@ -66,6 +66,9 @@ private:
 
 	void UpdateSelectionRings();
 
+	// Отладка: путь центра выбранных Squad линиями (algona.P2.DebugPath).
+	void DrawSelectedSquadPaths() const;
+
 	UPROPERTY(Transient)
 	TObjectPtr<AAlgonaRTSCameraActor> CameraActor = nullptr;
 

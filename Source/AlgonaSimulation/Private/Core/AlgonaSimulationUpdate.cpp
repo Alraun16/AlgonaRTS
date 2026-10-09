@@ -1,5 +1,6 @@
 #include "Core/AlgonaSimulationSubsystem.h"
 
+#include "Army/AlgonaSquadPath.h"
 #include "Army/AlgonaUnitSteering.h"
 
 #include "HAL/PlatformTime.h"
@@ -62,14 +63,22 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	const double CommandsEndSeconds =
 		FPlatformTime::Seconds();
 
-	// Стадия 2: движение центров Squad.
+	// Стадия 2: пути центров по навигации для новых приказов. За тик
+	// считается ограниченное число запросов, остальные ждут своей очереди
+	// и пока идут по прямой.
+	ProcessSquadPathRequests();
+
+	const double PathsEndSeconds =
+		FPlatformTime::Seconds();
+
+	// Стадия 3: движение центров Squad.
 	const bool bSquadCentersChanged =
 		UpdateSquadCenters(DeltaTime);
 
 	const double SquadsEndSeconds =
 		FPlatformTime::Seconds();
 
-	// Стадии 3-6: движение Unit (AlgonaSimulationMovement.cpp).
+	// Стадии 4-7: движение Unit (AlgonaSimulationMovement.cpp).
 	// Режим читается один раз, чтобы весь шаг шёл в одном режиме.
 	const bool bParallelMovement = IsParallelMovementEnabled();
 
@@ -113,8 +122,10 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	Metrics.LastMovedEntities = ChangedEntities;
 	Metrics.LastCommandsMilliseconds =
 		(CommandsEndSeconds - StepStartSeconds) * 1000.0;
+	Metrics.LastPathMilliseconds =
+		(PathsEndSeconds - CommandsEndSeconds) * 1000.0;
 	Metrics.LastSquadsMilliseconds =
-		(SquadsEndSeconds - CommandsEndSeconds) * 1000.0;
+		(SquadsEndSeconds - PathsEndSeconds) * 1000.0;
 	Metrics.LastLocalGridMilliseconds =
 		(LocalGridEndSeconds - SquadsEndSeconds) * 1000.0;
 	Metrics.LastSteerMilliseconds =
@@ -190,10 +201,12 @@ void UAlgonaSimulationSubsystem::ApplyMoveCommand(
 	Squad.TargetCenterLocation.Z = Squad.CenterLocation.Z;
 	Squad.bHasMoveTarget = true;
 
-	// Без явного направления — направление последнего отрезка пути.
-	// Пока путь прямой, это вектор от центра к цели; если цель совпадает
-	// с центром, направление не меняется.
+	// Без явного направления — направление последнего отрезка пути. Пока
+	// путь не посчитан, это вектор от центра к цели; когда придёт путь по
+	// навигации, направление возьмётся из его последнего отрезка.
 	FVector Direction = FinalDirection.GetSafeNormal2D();
+	Squad.bFinalFacingFromOrder = !Direction.IsNearlyZero();
+
 	if (Direction.IsNearlyZero())
 	{
 		Direction = (Squad.TargetCenterLocation - Squad.CenterLocation).GetSafeNormal2D();
@@ -206,10 +219,26 @@ void UAlgonaSimulationSubsystem::ApplyMoveCommand(
 	Squad.bHasFacingTarget = true;
 	Squad.bFinalTurnStarted = false;
 
-	// Режим движения решается один раз при получении приказа.
-	const double PathLength =
-		FVector::Dist2D(Squad.CenterLocation, Squad.TargetCenterLocation);
+	// Приказ не ждёт навигацию: Squad сразу идёт по прямой (путь из одной
+	// точки), а посчитанный путь заменит её через несколько тиков.
+	Squad.PathPoints.Reset(1);
+	Squad.PathPoints.Add(Squad.TargetCenterLocation);
+	Squad.PathPointIndex = 0;
+	Squad.PathMaxLookahead = 0.0f;
 
+	Squad.MoveMode = ChooseSquadMoveMode(
+		Squad,
+		FVector::Dist2D(Squad.CenterLocation, Squad.TargetCenterLocation));
+
+	RequestSquadPath(Squad);
+}
+
+EAlgonaSquadMoveMode UAlgonaSimulationSubsystem::ChooseSquadMoveMode(
+	const FAlgonaSquad& Squad,
+	double PathLength)
+{
+	// Марш не начинается раньше двух радиусов раскладки: широкому строю
+	// разворачиваться ради короткого пути незачем.
 	const double MarchMinDistance = FMath::Max(
 		static_cast<double>(GetFaceMovementMaxDistance()),
 		FAlgonaSquad::MarchMinRadiusFactor
@@ -217,16 +246,12 @@ void UAlgonaSimulationSubsystem::ApplyMoveCommand(
 
 	if (PathLength > MarchMinDistance)
 	{
-		Squad.MoveMode = EAlgonaSquadMoveMode::March;
+		return EAlgonaSquadMoveMode::March;
 	}
-	else if (PathLength > static_cast<double>(GetSidestepMaxDistance()))
-	{
-		Squad.MoveMode = EAlgonaSquadMoveMode::FaceMovement;
-	}
-	else
-	{
-		Squad.MoveMode = EAlgonaSquadMoveMode::Sidestep;
-	}
+
+	return PathLength > static_cast<double>(GetSidestepMaxDistance())
+		? EAlgonaSquadMoveMode::FaceMovement
+		: EAlgonaSquadMoveMode::Sidestep;
 }
 
 void UAlgonaSimulationSubsystem::ApplyMoveGroupCommand(
@@ -506,12 +531,56 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 
 		const FVector OldCenterLocation = Squad.CenterLocation;
 
-		FVector ToTarget = Squad.bHasMoveTarget
-			? Squad.TargetCenterLocation - Squad.CenterLocation
-			: FVector::ZeroVector;
-		ToTarget.Z = 0.0;
+		// Скорость крайнего слота = скорость центра + скорость от вращения.
+		// Пока Squad идёт, вращению остаётся только часть общего бюджета.
+		const double SlotSpeedBudget = FMath::Max(
+			static_cast<double>(Squad.MaxSlotSpeedFactor * Squad.CenterMoveSpeed
+				- Squad.CenterSpeed),
+			static_cast<double>(Squad.MinTurnRateFactor * Squad.CenterMoveSpeed));
 
-		const double DistanceToTarget = ToTarget.Length();
+		const double MaxYawRate = FMath::Min(
+			static_cast<double>(Squad.GetMaxYawRate()),
+			static_cast<double>(Squad.GetMaxYawRate())
+				* SlotSpeedBudget
+				/ static_cast<double>(Squad.TurnSpeedFactor * Squad.CenterMoveSpeed));
+
+		// Центр ведёт не точка поворота пути, а точка на пути впереди него:
+		// пока Squad едет, она скользит по пути, направление меняется
+		// постепенно, и угол срезается дугой. Расстояние впереди — радиус
+		// дуги поворота строя, но не больше того, что позволяет запас,
+		// отложенный этим путём от препятствий.
+		double Lookahead = GetSquadPathLookahead(Squad);
+
+		if (Squad.PathMaxLookahead > 0.0f)
+		{
+			Lookahead = FMath::Min(
+				Lookahead,
+				static_cast<double>(Squad.PathMaxLookahead));
+		}
+
+		// Остаток пути (а не прямая до цели) решает торможение у цели,
+		// упреждающий доворот и применение ширины строя.
+		FVector AimLocation = Squad.TargetCenterLocation;
+		double DistanceToTarget = 0.0;
+
+		if (Squad.bHasMoveTarget)
+		{
+			const FAlgonaPathFollowResult Follow = FollowAlgonaPath(
+				Squad.PathPoints,
+				Squad.CenterLocation,
+				Lookahead,
+				Squad.PathPointIndex);
+
+			AimLocation = Follow.AimLocation;
+			DistanceToTarget = Follow.RemainingDistance;
+		}
+
+		FVector ToAim = Squad.bHasMoveTarget
+			? AimLocation - Squad.CenterLocation
+			: FVector::ZeroVector;
+		ToAim.Z = 0.0;
+
+		const double DistanceToAim = ToAim.Length();
 
 		// Составной приказ: ширина строя применяется за 10 м до цели
 		// (или сразу, если путь короче). Reform сохраняет центр.
@@ -526,24 +595,14 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 			Squad.PendingRowLength = 0;
 		}
 
-		const bool bNeedsMove =
-			Squad.bHasMoveTarget && DistanceToTarget > KINDA_SMALL_NUMBER;
-		const FVector MoveDirection = bNeedsMove
-			? ToTarget / DistanceToTarget
+		const FVector MoveDirection = DistanceToAim > KINDA_SMALL_NUMBER
+			? ToAim / DistanceToAim
 			: FVector::ZeroVector;
 
-		// Скорость крайнего слота = скорость центра + скорость от вращения.
-		// Пока Squad идёт, вращению остаётся только часть общего бюджета.
-		const double SlotSpeedBudget = FMath::Max(
-			static_cast<double>(Squad.MaxSlotSpeedFactor * Squad.CenterMoveSpeed
-				- Squad.CenterSpeed),
-			static_cast<double>(Squad.MinTurnRateFactor * Squad.CenterMoveSpeed));
-
-		const double MaxYawRate = FMath::Min(
-			static_cast<double>(Squad.GetMaxYawRate()),
-			static_cast<double>(Squad.GetMaxYawRate())
-				* SlotSpeedBudget
-				/ static_cast<double>(Squad.TurnSpeedFactor * Squad.CenterMoveSpeed));
+		const bool bNeedsMove =
+			Squad.bHasMoveTarget
+			&& DistanceToTarget > KINDA_SMALL_NUMBER
+			&& !MoveDirection.IsZero();
 
 		// 1. Желаемое направление. На марше — по ходу движения, пока до цели
 		// дальше, чем Squad пройдёт за время поворота к конечному направлению
@@ -654,7 +713,7 @@ bool UAlgonaSimulationSubsystem::UpdateSquadCenters(
 			CongestionSlowRate,
 			DeltaTime);
 
-		// 4. Движение центра по прямой к цели с разгоном и торможением.
+		// 4. Движение центра к точке погони с разгоном и торможением.
 		// Желаемая скорость ограничена торможением к цели, поэтому центр
 		// встаёт ровно в цели, а не проскакивает её.
 		const double MoveAcceleration = static_cast<double>(Squad.GetMoveAcceleration());

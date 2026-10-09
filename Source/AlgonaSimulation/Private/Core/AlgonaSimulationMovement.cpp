@@ -233,6 +233,29 @@ namespace
 	// порциях раздача задач потокам стоит дороже самого расчёта.
 	constexpr int32 SteerMinBatchSize = 1024;
 
+	// Приводит массив состояния к размеру TotalCount: добавленные элементы
+	// получают значение по умолчанию, лишние отбрасываются. Уже лежащие
+	// элементы не трогаются — их индекс это UnitId - 1.
+	template <typename ElementType>
+	void ResizeArray(
+		TArray<ElementType>& Array,
+		int32 TotalCount,
+		const ElementType& DefaultValue)
+	{
+		if (Array.Num() > TotalCount)
+		{
+			Array.SetNum(TotalCount, EAllowShrinking::No);
+			return;
+		}
+
+		Array.Reserve(TotalCount);
+
+		while (Array.Num() < TotalCount)
+		{
+			Array.Add(DefaultValue);
+		}
+	}
+
 	// Опасный сосед на поперечной оси Unit: отрезок [Low, High], время до
 	// сближения и вес уступки соседа.
 	struct FAvoidanceThreat
@@ -270,27 +293,27 @@ float UAlgonaSimulationSubsystem::GetSquadCongestionSlowdown()
 	return CVarAlgonaP2SquadCongestionSlowdown.GetValueOnGameThread();
 }
 
-void UAlgonaSimulationSubsystem::InitializeUnitState(int32 UnitCount)
+void UAlgonaSimulationSubsystem::ResizeUnitState(int32 TotalUnitCount)
 {
 	FAlgonaUnitStateArrays& State = UnitState;
 
-	State.Positions.Init(FVector::ZeroVector, UnitCount);
-	State.FacingYaws.Init(0.0f, UnitCount);
-	State.Velocities.Init(FVector2f::ZeroVector, UnitCount);
-	State.SquadIds.Init(INDEX_NONE, UnitCount);
-	State.SlotIndices.Init(INDEX_NONE, UnitCount);
-	State.Radii.Init(FAlgonaSquad::DefaultUnitRadiusCm, UnitCount);
-	State.MeshScales.Init(1.0f, UnitCount);
-	State.DesiredVelocities.Init(FVector2f::ZeroVector, UnitCount);
-	State.NextVelocities.Init(FVector2f::ZeroVector, UnitCount);
-	State.Crowding.Init(0.0f, UnitCount);
-	State.AvoidanceFacingFlags.Init(0, UnitCount);
-	State.SeparationVelocities.Init(FVector2f::ZeroVector, UnitCount);
-	State.ContactDepths.Init(0.0f, UnitCount);
-	State.DodgeVelocities.Init(FVector2f::ZeroVector, UnitCount);
-	State.AvoidanceBrakes.Init(0.0f, UnitCount);
-	State.ChangedFlags.Init(0, UnitCount);
-	State.CellChangedFlags.Init(0, UnitCount);
+	ResizeArray(State.Positions, TotalUnitCount, FVector::ZeroVector);
+	ResizeArray(State.FacingYaws, TotalUnitCount, 0.0f);
+	ResizeArray(State.Velocities, TotalUnitCount, FVector2f::ZeroVector);
+	ResizeArray(State.SquadIds, TotalUnitCount, static_cast<int32>(INDEX_NONE));
+	ResizeArray(State.SlotIndices, TotalUnitCount, static_cast<int32>(INDEX_NONE));
+	ResizeArray(State.Radii, TotalUnitCount, FAlgonaSquad::DefaultUnitRadiusCm);
+	ResizeArray(State.MeshScales, TotalUnitCount, 1.0f);
+	ResizeArray(State.DesiredVelocities, TotalUnitCount, FVector2f::ZeroVector);
+	ResizeArray(State.NextVelocities, TotalUnitCount, FVector2f::ZeroVector);
+	ResizeArray(State.Crowding, TotalUnitCount, 0.0f);
+	ResizeArray(State.AvoidanceFacingFlags, TotalUnitCount, static_cast<uint8>(0));
+	ResizeArray(State.SeparationVelocities, TotalUnitCount, FVector2f::ZeroVector);
+	ResizeArray(State.ContactDepths, TotalUnitCount, 0.0f);
+	ResizeArray(State.DodgeVelocities, TotalUnitCount, FVector2f::ZeroVector);
+	ResizeArray(State.AvoidanceBrakes, TotalUnitCount, 0.0f);
+	ResizeArray(State.ChangedFlags, TotalUnitCount, static_cast<uint8>(0));
+	ResizeArray(State.CellChangedFlags, TotalUnitCount, static_cast<uint8>(0));
 }
 
 void UAlgonaSimulationSubsystem::SteerUnits(

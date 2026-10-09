@@ -6,6 +6,7 @@
 #include "Army/AlgonaUnitTrait.h"
 
 #include "Engine/World.h"
+#include "HAL/PlatformTime.h"
 #include "MassEntityConfigAsset.h"
 #include "MassEntityManager.h"
 #include "MassEntitySubsystem.h"
@@ -14,9 +15,95 @@
 #include "MassSpawnerSubsystem.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
+FAlgonaSpawnArmyResult UAlgonaSimulationSubsystem::SpawnArmy(
+	int32 UnitCount,
+	int32 RequestedSquadSize,
+	const FVector& Origin,
+	const FVector& Forward)
+{
+	FAlgonaSpawnArmyResult Result;
+
+	if (!IsAuthoritativeSimulationWorld())
+	{
+		return Result;
+	}
+
+	const double StartSeconds = FPlatformTime::Seconds();
+
+	if (!CreateUnits(UnitCount, RequestedSquadSize, Origin, Forward, Result))
+	{
+		UE_LOG(
+			LogAlgonaSimulation,
+			Error,
+			TEXT("[P2 Spawn] failed to create %d units (state %d)"),
+			UnitCount,
+			static_cast<int32>(Metrics.StartupState));
+		return Result;
+	}
+
+#if !UE_BUILD_SHIPPING
+	// Полная проверка связи Squad <-> Unit после каждого спавна.
+	if (!ValidateSquadMembership())
+	{
+		Metrics.StartupState =
+			EAlgonaSimulationStartupState::SquadInitializationFailed;
+		return Result;
+	}
+#endif
+
+	Metrics.StartupState = EAlgonaSimulationStartupState::Ready;
+	Metrics.EntityCount = UnitEntities.Num();
+	Metrics.SquadCount = Squads.Num();
+
+	// Новое состояние доступно Presentation.
+	++StateRevision;
+
+	UE_LOG(
+		LogAlgonaSimulation,
+		Display,
+		TEXT("[P2 Spawn] units=%d squads=%d skippedCells=%d%s | origin=%s forward=%s | total units=%d squads=%d | %.0f ms"),
+		Result.UnitCount,
+		Result.SquadCount,
+		Result.SkippedCells,
+		Result.bRanOutOfSpace ? TEXT(" (ran out of free space)") : TEXT(""),
+		*Origin.ToCompactString(),
+		*Forward.GetSafeNormal2D().ToCompactString(),
+		UnitEntities.Num(),
+		Squads.Num(),
+		(FPlatformTime::Seconds() - StartSeconds) * 1000.0);
+
+	return Result;
+}
+
+void UAlgonaSimulationSubsystem::ClearArmy()
+{
+	if (!IsAuthoritativeSimulationWorld())
+	{
+		return;
+	}
+
+	const int32 PreviousUnitCount = UnitEntities.Num();
+	const int32 PreviousSquadCount = Squads.Num();
+
+	DestroyUnits();
+	++StateRevision;
+
+	Metrics.StartupState = EAlgonaSimulationStartupState::Ready;
+
+	UE_LOG(
+		LogAlgonaSimulation,
+		Display,
+		TEXT("[P2 Spawn] cleared units=%d squads=%d"),
+		PreviousUnitCount,
+		PreviousSquadCount);
+}
+
 bool UAlgonaSimulationSubsystem::CreateUnits(
 	int32 UnitCount,
-	int32 RequestedSquadSize)
+	int32 RequestedSquadSize,
+	const FVector& Origin,
+	const FVector& Forward,
+	FAlgonaSpawnArmyResult& OutResult)
 {
 	UWorld* World = GetWorld();
 	if (!World
@@ -29,33 +116,40 @@ bool UAlgonaSimulationSubsystem::CreateUnits(
 		return false;
 	}
 
-	UnitEntityConfig = NewObject<UMassEntityConfigAsset>(
-		this,
-		TEXT("AlgonaUnitRuntimeConfig"));
-
-	UAlgonaUnitTrait* UnitTrait =
-		UnitEntityConfig
-			? NewObject<UAlgonaUnitTrait>(UnitEntityConfig)
-			: nullptr;
-
-	if (!UnitEntityConfig || !UnitTrait)
+	// Шаблон сущности строится один раз на мир и переиспользуется
+	// следующими спавнами.
+	if (!UnitEntityConfig)
 	{
-		Metrics.StartupState =
-			EAlgonaSimulationStartupState::UnitTemplateBuildFailed;
-		return false;
-	}
+		UnitEntityConfig = NewObject<UMassEntityConfigAsset>(
+			this,
+			TEXT("AlgonaUnitRuntimeConfig"));
 
-	FMassEntityConfig& UnitConfig =
-		UnitEntityConfig->GetMutableConfig();
-	UnitConfig.AddTrait(*UnitTrait);
+		UAlgonaUnitTrait* UnitTrait =
+			UnitEntityConfig
+				? NewObject<UAlgonaUnitTrait>(UnitEntityConfig)
+				: nullptr;
+
+		if (!UnitEntityConfig || !UnitTrait)
+		{
+			Metrics.StartupState =
+				EAlgonaSimulationStartupState::UnitTemplateBuildFailed;
+			return false;
+		}
+
+		FMassEntityConfig& UnitConfig =
+			UnitEntityConfig->GetMutableConfig();
+		UnitConfig.AddTrait(*UnitTrait);
+	}
 
 	// Simulation creates only authoritative entity state. Presentation chooses
 	// its renderer independently and never adds renderer fragments here.
 	const FMassEntityTemplate& UnitTemplate =
 		UnitEntityConfig->GetOrCreateEntityTemplate(*World);
 
-	UnitEntities.Reset();
-	UnitEntities.Reserve(UnitCount);
+	// Unit досыпаются к уже существующим: индекс нового Unit (UnitId - 1)
+	// продолжает нумерацию, поэтому индексы прежних Unit остаются верными.
+	const int32 FirstUnitIndex = UnitEntities.Num();
+	UnitEntities.Reserve(FirstUnitIndex + UnitCount);
 
 	// Keep the creation context alive until initial fragment data is filled.
 	const TSharedPtr<FMassEntityManager::FEntityCreationContext>
@@ -65,14 +159,14 @@ bool UAlgonaSimulationSubsystem::CreateUnits(
 			UnitEntities);
 
 	if (!CreationContext.IsValid()
-		|| UnitEntities.Num() != UnitCount)
+		|| UnitEntities.Num() != FirstUnitIndex + UnitCount)
 	{
 		Metrics.StartupState =
 			EAlgonaSimulationStartupState::UnitSpawnFailed;
 		return false;
 	}
 
-	if (!CreateSquads(RequestedSquadSize))
+	if (!CreateSquads(RequestedSquadSize, FirstUnitIndex, Origin, Forward, OutResult))
 	{
 		Metrics.StartupState =
 			EAlgonaSimulationStartupState::SquadInitializationFailed;
@@ -114,13 +208,24 @@ namespace
 	constexpr int32 LargeSquadMemberCount = 5;
 	constexpr int32 MixedSquadMemberCount = 8;
 	constexpr int32 MixedSquadLargeCount = 2;
+
+	// Запас кандидатов на один Squad при расстановке: если столько клеток
+	// подряд не подошло, свободного места рядом считай что нет.
+	constexpr int32 SpawnCandidatesPerSquad = 4;
+	constexpr int32 SpawnCandidatesReserve = 64;
 }
 
-bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
+bool UAlgonaSimulationSubsystem::CreateSquads(
+	int32 RequestedSquadSize,
+	int32 FirstUnitIndex,
+	const FVector& Origin,
+	const FVector& Forward,
+	FAlgonaSpawnArmyResult& OutResult)
 {
 	if (!MassEntitySubsystem
 		|| UnitEntities.IsEmpty()
-		|| RequestedSquadSize <= 0)
+		|| RequestedSquadSize <= 0
+		|| !UnitEntities.IsValidIndex(FirstUnitIndex))
 	{
 		return false;
 	}
@@ -128,7 +233,6 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 	FMassEntityManager& EntityManager =
 		MassEntitySubsystem->GetMutableEntityManager();
 
-	const int32 SquadsPerRow = AlgonaSimulationDefaults::SquadsPerRow;
 	constexpr float SpaceBetweenSquads = 600.0f;
 	constexpr float UnitSpacing = 150.0f;
 
@@ -160,22 +264,53 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 	// Оценка числа отрядов: тестовые отряды крупных существ меньше обычных,
 	// поэтому их получится больше. Точное число известно только по ходу.
 	const int32 EstimatedSquadCount = FMath::DivideAndRoundUp(
-		UnitEntities.Num(),
+		UnitEntities.Num() - FirstUnitIndex,
 		RequestedSquadSize);
 
-	Squads.Reset();
-	Squads.Reserve(EstimatedSquadCount);
-	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
-	InitializeUnitState(UnitEntities.Num());
+	Squads.Reserve(Squads.Num() + EstimatedSquadCount);
+	ResizeUnitState(UnitEntities.Num());
 
-	int32 UnitIndex = 0;
+	// Клетки раскладки: ряды назад от Origin, внутри ряда слева направо
+	// относительно Forward, ряд выровнен по середине. Origin — середина
+	// передней линии армии.
+	FVector PlacementForward = Forward.GetSafeNormal2D();
+	if (PlacementForward.IsNearlyZero())
+	{
+		PlacementForward = FVector::ForwardVector;
+	}
+
+	const FVector PlacementRight =
+		FVector::CrossProduct(FVector::UpVector, PlacementForward).GetSafeNormal();
+
+	// Клеток в ряду — корень из их числа: армия встаёт примерно квадратом.
+	const int32 CellsPerRow = FMath::Max(
+		FMath::CeilToInt32(FMath::Sqrt(static_cast<double>(EstimatedSquadCount))),
+		1);
+
+	// Площадка одной клетки: половина шага раскладки по обеим осям.
+	const FVector2D PlacementHalfExtent(
+		static_cast<double>(SquadSpacingX) * 0.5,
+		static_cast<double>(SquadSpacingY) * 0.5);
+
+	// Сколько клеток вообще разрешено перебрать: занятые и непроходимые
+	// пропускаются, но бесконечно искать место незачем.
+	const int32 MaxCandidates =
+		EstimatedSquadCount * SpawnCandidatesPerSquad + SpawnCandidatesReserve;
+
+	// Переиспользуемый буфер запроса к Unit Grid.
+	TArray<uint32> PlacementScratch;
+
+	const int32 FirstSquadIndex = Squads.Num();
+
+	int32 CandidateIndex = 0;
+	int32 UnitIndex = FirstUnitIndex;
 	int32 LargeSquadCount = 0;
 	int32 MixedSquadCount = 0;
 	int32 LargeUnitCount = 0;
 
 	// Отряды создаются, пока есть нераспределённые Unit: состав отряда
 	// зависит от его номера, поэтому число отрядов заранее неизвестно.
-	for (int32 SquadIndex = 0;
+	for (int32 SquadIndex = Squads.Num();
 		UnitIndex < UnitEntities.Num();
 		++SquadIndex)
 	{
@@ -256,20 +391,63 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 
 		Squad.RebuildFormationLayout();
 
-		// Передние строки отрядов одного ряда стоят на одной линии,
-		// центр отряда отсчитывается от передней строки.
-		const int32 SquadX = SquadIndex % SquadsPerRow;
-		const int32 SquadY = SquadIndex / SquadsPerRow;
+		// Клетка для Squad — первая свободная из кандидатов: ряды назад от
+		// Origin, внутри ряда от середины вправо. Занятые и непроходимые
+		// клетки пропускаются.
+		FVector CellCenter = FVector::ZeroVector;
+		bool bCellFound = false;
 
-		const double FrontRowX =
-			static_cast<double>(SquadX) * SquadSpacingX
-			+ FormationWorldDepth;
+		while (CandidateIndex < MaxCandidates)
+		{
+			const int32 CellRow = CandidateIndex / CellsPerRow;
+			const int32 CellColumn = CandidateIndex % CellsPerRow;
+			++CandidateIndex;
 
-		Squad.CenterLocation = FVector(
-			FrontRowX - Squad.FormationLayout.FrontRowLocalX,
-			static_cast<double>(SquadY) * SquadSpacingY
-				+ FormationWorldWidth * 0.5,
-			0.0);
+			const double LateralOffset =
+				(static_cast<double>(CellColumn)
+					- static_cast<double>(CellsPerRow - 1) * 0.5)
+				* static_cast<double>(SquadSpacingY);
+
+			FVector Candidate = Origin
+				- PlacementForward
+					* (static_cast<double>(CellRow) * static_cast<double>(SquadSpacingX))
+				+ PlacementRight * LateralOffset;
+			Candidate.Z = Origin.Z;
+
+			if (!IsSquadPlacementFree(
+				Candidate,
+				PlacementForward,
+				PlacementHalfExtent,
+				PlacementScratch))
+			{
+				++OutResult.SkippedCells;
+				continue;
+			}
+
+			CellCenter = Candidate;
+			bCellFound = true;
+			break;
+		}
+
+		if (!bCellFound)
+		{
+			// Свободного места не нашлось: этот Squad не создаётся, а его
+			// Unit удаляются после цикла.
+			Squads.Pop(EAllowShrinking::No);
+			OutResult.bRanOutOfSpace = true;
+			break;
+		}
+
+		// Передние строки отрядов одного ряда стоят на одной линии:
+		// центр отсчитывается от передней линии клетки, поэтому мелкий
+		// отряд крупных существ не провисает в середину клетки.
+		Squad.CenterLocation = CellCenter
+			+ PlacementForward
+				* (static_cast<double>(FormationWorldDepth) * 0.5
+					- static_cast<double>(Squad.FormationLayout.FrontRowLocalX));
+		Squad.CenterLocation.Z = Origin.Z;
+		Squad.FacingDirection = PlacementForward;
+		Squad.FinalFacingDirection = PlacementForward;
 		Squad.TargetCenterLocation = Squad.CenterLocation;
 
 		// Unit стартуют в своих слотах и смотрят по направлению Squad.
@@ -317,6 +495,22 @@ bool UAlgonaSimulationSubsystem::CreateSquads(int32 RequestedSquadSize)
 		}
 	}
 
+	// Места не нашлось: Unit, оставшиеся без Squad, удаляются. Они в хвосте
+	// массивов, поэтому индексы (UnitId - 1) прежних Unit не меняются.
+	if (UnitIndex < UnitEntities.Num() && MassSpawnerSubsystem)
+	{
+		TArray<FMassEntityHandle> SurplusEntities(
+			UnitEntities.GetData() + UnitIndex,
+			UnitEntities.Num() - UnitIndex);
+
+		MassSpawnerSubsystem->DestroyEntities(SurplusEntities);
+		UnitEntities.SetNum(UnitIndex, EAllowShrinking::No);
+		ResizeUnitState(UnitIndex);
+	}
+
+	OutResult.UnitCount = UnitIndex - FirstUnitIndex;
+	OutResult.SquadCount = Squads.Num() - FirstSquadIndex;
+
 	// Явный отчёт о составе: сразу видно, применились ли настройки
 	// тестовых отрядов крупных существ.
 	UE_LOG(
@@ -349,6 +543,7 @@ void UAlgonaSimulationSubsystem::DestroyUnits()
 	Squads.Reset();
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	PendingCommands.Reset();
+	PathRequestQueue.Reset();
 	bStressMoveEnabled = false;
 	StressMoveDirections.Reset();
 	UnitEntityConfig = nullptr;

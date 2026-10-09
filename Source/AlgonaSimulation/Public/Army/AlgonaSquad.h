@@ -138,6 +138,25 @@ struct ALGONASIMULATION_API FAlgonaSquad
 
 	bool bHasMoveTarget = false;
 
+	// Путь центра по навигации: точки, по которым идёт центр, последняя —
+	// цель приказа. Пока путь не посчитан (и если навигации нет), в нём
+	// одна точка — сама цель, то есть Squad идёт по прямой.
+	TArray<FVector> PathPoints;
+
+	// К какой точке пути Squad идёт сейчас.
+	int32 PathPointIndex = 0;
+
+	// Предел расстояния погони для этого пути, см: 0 — предела нет.
+	// Срез угла дугой примерно равен расстоянию погони, поэтому он не
+	// должен превышать запас, который удалось отложить от препятствий.
+	float PathMaxLookahead = 0.0f;
+
+	// Squad стоит в очереди запросов к навигации: путь ещё не посчитан.
+	bool bPathRequestPending = false;
+
+	// Конечное направление задано приказом игрока: путь его не меняет.
+	bool bFinalFacingFromOrder = false;
+
 	// Конечное направление текущего приказа. Движение его не перезаписывает.
 	FVector FinalFacingDirection = FVector::ForwardVector;
 
@@ -206,6 +225,13 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	static constexpr double SidestepMaxDistanceCm = 1000.0;
 	static constexpr double FaceMovementMaxDistanceCm = 2000.0;
 	static constexpr double MarchMinRadiusFactor = 2.0;
+
+	// Сглаживание углов пути: центр ведёт точка на пути впереди него, и чем
+	// она дальше, тем шире срезается угол. По умолчанию это расстояние равно
+	// радиусу дуги, по которой строй вообще способен повернуть (скорость,
+	// делённая на угловую скорость), в пределах этих границ, см.
+	static constexpr double MinPathLookaheadCm = 150.0;
+	static constexpr double MaxPathLookaheadCm = 3000.0;
 
 	// Марш: доля пути, на которой начинается доворот к конечному
 	// направлению. 1.0 — доворот заканчивается ровно в цели, меньше —

@@ -225,7 +225,7 @@ void UAlgonaSimulationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 
 	const int32 UnitCount = FMath::Clamp(
 		CVarAlgonaP0UnitCount.GetValueOnGameThread(),
-		1,
+		0,
 		500000);
 
 	const int32 SquadSize = FMath::Clamp(
@@ -233,29 +233,25 @@ void UAlgonaSimulationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		1,
 		1000);
 
-	if (!CreateUnits(UnitCount, SquadSize))
+	// Ноль — мир стартует пустым, армия создаётся командой algona.P2.Spawn.
+	// Так запуск PIE не тратит время на создание сотен тысяч Unit, когда
+	// проверяется что-то другое.
+	if (UnitCount == 0)
 	{
-		DestroyUnits();
+		Metrics.StartupState = EAlgonaSimulationStartupState::Ready;
 		return;
 	}
 
-#if !UE_BUILD_SHIPPING
-	// Разовая полная проверка связи Squad <-> Unit после создания армии.
-	if (!ValidateSquadMembership())
+	const FAlgonaSpawnArmyResult SpawnResult = SpawnArmy(
+		UnitCount,
+		SquadSize,
+		FVector::ZeroVector,
+		FVector::ForwardVector);
+
+	if (SpawnResult.UnitCount <= 0)
 	{
-		Metrics.StartupState =
-			EAlgonaSimulationStartupState::SquadInitializationFailed;
 		DestroyUnits();
-		return;
 	}
-#endif
-
-	// First complete authoritative state is now available to Presentation.
-	++StateRevision;
-
-	Metrics.StartupState = EAlgonaSimulationStartupState::Ready;
-	Metrics.EntityCount = UnitEntities.Num();
-	Metrics.SquadCount = Squads.Num();
 }
 
 void UAlgonaSimulationSubsystem::Deinitialize()
@@ -267,6 +263,7 @@ void UAlgonaSimulationSubsystem::Deinitialize()
 	Squads.Reset();
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	PendingCommands.Reset();
+	PathRequestQueue.Reset();
 	bStressMoveEnabled = false;
 	StressMoveDirections.Reset();
 	UnitEntityConfig = nullptr;
@@ -449,19 +446,22 @@ void UAlgonaSimulationSubsystem::SetStressMoveEnabled(bool bEnabled)
 
 	if (bStressMoveEnabled)
 	{
-		// Чётные ряды отрядов идут в +Y, нечётные в -Y, поэтому соседние
-		// ряды проходят друг сквозь друга.
+		// Полосы по Y шириной в один отряд: чётные идут в +Y, нечётные
+		// в -Y, поэтому соседние полосы проходят друг сквозь друга.
+		// Полоса считается по положению Squad, а не по его номеру: армия
+		// может быть расставлена командой спавна как угодно.
 		StressMoveDirections.SetNum(Squads.Num());
 
 		for (int32 SquadIndex = 0;
 			SquadIndex < Squads.Num();
 			++SquadIndex)
 		{
-			const int32 Row =
-				SquadIndex / AlgonaSimulationDefaults::SquadsPerRow;
+			const int32 Band = FMath::FloorToInt32(
+				Squads[SquadIndex].CenterLocation.Y
+					/ AlgonaSimulationDefaults::StressBandWidthCm);
 
 			StressMoveDirections[SquadIndex] =
-				(Row % 2 == 0) ? 1 : -1;
+				(FMath::Abs(Band) % 2 == 0) ? 1 : -1;
 		}
 	}
 
@@ -547,6 +547,7 @@ void UAlgonaSimulationSubsystem::AccumulateMetricsReportStep()
 	Window.SquadsMillisecondsSum += Metrics.LastSquadsMilliseconds;
 	Window.SteerMillisecondsSum += Metrics.LastSteerMilliseconds;
 	Window.UnitGridMillisecondsSum += Metrics.LastUnitGridMilliseconds;
+	Window.PathsMillisecondsSum += Metrics.LastPathMilliseconds;
 	Window.LocalGridMillisecondsSum += Metrics.LastLocalGridMilliseconds;
 	Window.SeparationMillisecondsSum += Metrics.LastSeparationMilliseconds;
 	Window.MovedEntitiesSum += Metrics.LastMovedEntities;
@@ -609,7 +610,7 @@ void UAlgonaSimulationSubsystem::UpdateMetricsReport(
 	UE_LOG(
 		LogAlgonaSimulation,
 		Display,
-		TEXT("[P2 Metrics] units=%d window=%.2fs steps=%d (%.1f Hz) maxSteps/frame=%d | step avg=%.2f max=%.2f ms | commands=%.2f squads=%.2f steer=%.2f l3grid=%.2f l3=%.2f grid=%.2f ms | fps avg=%.0f worst=%.0f | changed avg=%lld | backlog=%.3fs overloaded+=%llu | parallel=%s workers=%d | stress=%s"),
+		TEXT("[P2 Metrics] units=%d window=%.2fs steps=%d (%.1f Hz) maxSteps/frame=%d | step avg=%.2f max=%.2f ms | commands=%.2f path=%.2f squads=%.2f steer=%.2f l3grid=%.2f l3=%.2f grid=%.2f ms | fps avg=%.0f worst=%.0f | changed avg=%lld | backlog=%.3fs overloaded+=%llu | parallel=%s workers=%d | stress=%s"),
 		UnitEntities.Num(),
 		WindowSeconds,
 		Window.StepCount,
@@ -618,6 +619,7 @@ void UAlgonaSimulationSubsystem::UpdateMetricsReport(
 		Window.StepMillisecondsSum * InverseStepCount,
 		Window.StepMillisecondsMax,
 		Window.CommandsMillisecondsSum * InverseStepCount,
+		Window.PathsMillisecondsSum * InverseStepCount,
 		Window.SquadsMillisecondsSum * InverseStepCount,
 		Window.SteerMillisecondsSum * InverseStepCount,
 		Window.LocalGridMillisecondsSum * InverseStepCount,

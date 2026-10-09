@@ -15,5 +15,8 @@ public class AlgonaSimulation : ModuleRules
 			"MassEntity",
 			"MassSpawner"
 		});
+
+		// Пути центров Squad по навигационной карте мира (P2, шаг 16).
+		PrivateDependencyModuleNames.Add("NavigationSystem");
 	}
 }

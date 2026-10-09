@@ -32,11 +32,10 @@ namespace AlgonaSimulationDefaults
 	inline constexpr int32 SquadSize = 50;
 	inline constexpr double SpatialGridCellSizeCm = 10000.0;
 
-	// Стартовая раскладка армии: число отрядов в одном ряду вдоль X.
-	inline constexpr int32 SquadsPerRow = 40;
-
-	// Стресс-сценарий замеров P2: длина одного прохода ряда отрядов по Y, см.
+	// Стресс-сценарий замеров P2: длина одного прохода ряда отрядов по Y, см,
+	// и ширина полосы, в которой отряды идут в одну сторону.
 	inline constexpr double StressMoveDistanceCm = 4000.0;
+	inline constexpr double StressBandWidthCm = 2000.0;
 
 	// Групповой приказ: расстояние между точками центров Squad относительно
 	// размера самого крупного Squad группы.
@@ -81,6 +80,21 @@ struct FAlgonaSquadCommand
 
 	// MoveGroup: Squad группы.
 	TArray<int32> SquadIds;
+};
+
+/**
+ * Итог одного спавна армии: что реально встало на карту.
+ * Клетка раскладки пропускается, если она не целиком на проходимой земле
+ * или в ней уже стоят чужие Unit.
+ */
+struct FAlgonaSpawnArmyResult
+{
+	int32 UnitCount = 0;
+	int32 SquadCount = 0;
+	int32 SkippedCells = 0;
+
+	// Свободных клеток не нашлось, спавн остановлен раньше времени.
+	bool bRanOutOfSpace = false;
 };
 
 /**
@@ -142,6 +156,15 @@ public:
 		return UnitState.Radii.IsValidIndex(UnitIndex)
 			? UnitState.Radii[UnitIndex]
 			: 0.0f;
+	}
+
+	/**
+	 * Ворота коридора последнего построенного пути, парами точек
+	 * (algona.P2.DebugPath 2). Только для отладочной отрисовки.
+	 */
+	const TArray<FVector>& GetDebugPathPortals() const
+	{
+		return DebugPathPortals;
 	}
 
 	/** Squad по SquadId или nullptr. */
@@ -241,6 +264,21 @@ public:
 	int32 SubmitMoveAllSquadsByOffset(const FVector& Offset);
 
 	/**
+	 * Досыпает армию к уже существующей: создаёт Unit и расставляет Squad
+	 * клетками от точки Origin назад по направлению Forward (Origin —
+	 * середина передней линии). Клетка занимается только если площадка
+	 * Squad целиком на проходимой земле и в ней нет чужих Unit.
+	 */
+	FAlgonaSpawnArmyResult SpawnArmy(
+		int32 UnitCount,
+		int32 RequestedSquadSize,
+		const FVector& Origin,
+		const FVector& Forward);
+
+	/** Убирает всех Unit и Squad. */
+	void ClearArmy();
+
+	/**
 	 * Инструмент замеров P2, не игровая механика.
 	 * Соседние ряды отрядов постоянно ходят навстречу друг другу и
 	 * разворачиваются по прибытии, поэтому двигаются все Unit.
@@ -272,6 +310,7 @@ private:
 		double StepMillisecondsSum = 0.0;
 		double StepMillisecondsMax = 0.0;
 		double CommandsMillisecondsSum = 0.0;
+		double PathsMillisecondsSum = 0.0;
 		double SquadsMillisecondsSum = 0.0;
 		double SteerMillisecondsSum = 0.0;
 		double UnitGridMillisecondsSum = 0.0;
@@ -352,13 +391,34 @@ private:
 
 	bool CreateUnits(
 		int32 UnitCount,
-		int32 RequestedSquadSize);
-	bool CreateSquads(int32 RequestedSquadSize);
+		int32 RequestedSquadSize,
+		const FVector& Origin,
+		const FVector& Forward,
+		FAlgonaSpawnArmyResult& OutResult);
+	bool CreateSquads(
+		int32 RequestedSquadSize,
+		int32 FirstUnitIndex,
+		const FVector& Origin,
+		const FVector& Forward,
+		FAlgonaSpawnArmyResult& OutResult);
 	void DestroyUnits();
 
-	// Задаёт размер массивов состояния Unit и заполняет их значениями
-	// по умолчанию.
-	void InitializeUnitState(int32 UnitCount);
+	// Приводит массивы состояния Unit к размеру TotalUnitCount: добавленные
+	// элементы получают значения по умолчанию, лишние отбрасываются.
+	// Уже существующие Unit не трогает: их индексы (UnitId - 1) не меняются.
+	void ResizeUnitState(int32 TotalUnitCount);
+
+	/**
+	 * Площадка Squad свободна: прямоугольник HalfExtent вокруг Center
+	 * (повёрнутый по Forward) целиком лежит на проходимой земле и в нём
+	 * нет Unit. Проверка проходимости пропускается, если навигации в мире
+	 * нет. Реализация — AlgonaSimulationPath.cpp.
+	 */
+	bool IsSquadPlacementFree(
+		const FVector& Center,
+		const FVector& Forward,
+		const FVector2D& HalfExtent,
+		TArray<uint32>& ScratchUnitIds);
 
 	// Добавляет снимок одного Unit, прочитанный из массивов состояния.
 	void AppendUnitSnapshot(
@@ -380,6 +440,60 @@ private:
 		const FVector& FinalDirection,
 		int32 RowLength);
 	void ApplyMoveGroupCommand(const FAlgonaSquadCommand& Command);
+
+	// Режим движения по длине пути (шаг вбок / лицом вперёд / марш).
+	static EAlgonaSquadMoveMode ChooseSquadMoveMode(
+		const FAlgonaSquad& Squad,
+		double PathLength);
+
+	// --- Путь центра Squad по навигации (AlgonaSimulationPath.cpp) ---
+
+	// Ставит Squad в очередь запросов пути. До ответа Squad идёт по прямой.
+	void RequestSquadPath(FAlgonaSquad& Squad);
+
+	// Стадия шага: считает пути для очереди запросов, не больше
+	// algona.P2.PathQueriesPerTick за тик.
+	void ProcessSquadPathRequests();
+
+	// Один запрос к навигации UE. false — пути нет (или навигации нет),
+	// Squad продолжает идти по прямой.
+	bool BuildSquadPath(FAlgonaSquad& Squad);
+
+	// Один запрос пути к указанной карте проходимости. Точки возвращаются
+	// без первой (это сама позиция центра Squad). bOutPartial — путь обрывается
+	// раньше цели: по широкой карте это значит, что строй там не проходит.
+	// Приказ не выполняется: цели нет на карте проходимости или пути к ней
+	// нет. Squad остаётся на месте — выбирать другую цель за игрока нельзя.
+	void CancelSquadMoveOrder(FAlgonaSquad& Squad, const TCHAR* Reason);
+
+	bool QuerySquadPathPoints(
+		const FAlgonaSquad& Squad,
+		const class ANavigationData& NavData,
+		const FVector& StartLocation,
+		double Clearance,
+		TArray<FVector>& OutPoints,
+		TArray<struct FAlgonaPathPortal>& OutPortals,
+		FVector& OutStartLocation,
+		bool& bOutPartial);
+
+	// Приводит приказ к посчитанному пути: режим движения по длине пути и
+	// конечное направление по его последнему отрезку.
+	void ApplySquadPathToOrder(FAlgonaSquad& Squad);
+
+	/**
+	 * Расстояние до точки погони, см: радиус дуги, по которой строй вообще
+	 * способен повернуть (скорость, делённая на угловую скорость), в
+	 * пределах MinPathLookaheadCm..MaxPathLookaheadCm. Им же определяется
+	 * запас, который путь держит от препятствий на повороте.
+	 */
+	static double GetSquadPathLookahead(const FAlgonaSquad& Squad);
+
+	// Значения CVar algona.P2.Path*.
+	static bool IsSquadPathEnabled();
+	static int32 GetPathQueriesPerTick();
+	static float GetPathAgentRadius();
+	static float GetPathWideDetour();
+	static float GetPathLookaheadOverride();
 
 	// Переназначение Unit по слотам после Reform: каждый занимает ближайший
 	// подходящий слот, чтобы никто не бежал через весь строй.
@@ -459,6 +573,20 @@ private:
 	TArray<FAlgonaSquad> Squads;
 	// Очередь команд до начала следующего fixed step.
 	TArray<FAlgonaSquadCommand> PendingCommands;
+
+	// Squad, ждущие расчёта пути, в порядке поступления приказов.
+	TArray<int32> PathRequestQueue;
+
+	// Про отсутствие навигации в мире и про первый неудавшийся запрос пути
+	// сообщается по одному разу за запуск.
+	bool bMissingNavigationLogged = false;
+	bool bPathQueryFailedLogged = false;
+	bool bMissingSquadNavDataLogged = false;
+
+	// Ворота коридора последнего построенного пути, парами точек.
+	// Заполняются только при algona.P2.DebugPath 2.
+	TArray<FVector> DebugPathPortals;
+	bool bPlacementWithoutNavigationLogged = false;
 
 	FAlgonaMetricsReportWindow MetricsReportWindow;
 

@@ -28,6 +28,9 @@ struct ALGONASIMULATION_API FAlgonaSimulationMetrics
 	// Время отдельных стадий последнего fixed step, мс.
 	// Сумма стадий чуть меньше LastStepMilliseconds: остаток — учёт метрик.
 	double LastCommandsMilliseconds = 0.0;
+
+	// L1: пути центров по навигации и само движение центров.
+	double LastPathMilliseconds = 0.0;
 	double LastSquadsMilliseconds = 0.0;
 
 	// Движение Unit: L2 над плоскими массивами и обновление Unit Grid.
