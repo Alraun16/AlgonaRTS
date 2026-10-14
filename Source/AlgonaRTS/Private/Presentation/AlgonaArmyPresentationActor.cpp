@@ -36,7 +36,21 @@ namespace
 	using AlgonaGpuInterpolation::CustomDataFloatCount;
 	using AlgonaGpuInterpolation::NearAlphaPrimitiveDataIndex;
 
-	constexpr int32 AnimationIndex = 0;
+	// Номера анимаций — это номера последовательностей в банке анимаций по
+	// порядку: провайдер анимаций создаётся из банка один к одному.
+	// 0 — ходьба. 1 — покой: анимация с PlayRate 0 застывает на своём
+	// кадре 0. Position при этом не работает: провайдер считает время как
+	// (t − метка) × PlayRate, а метку из Position получает делением на
+	// PlayRate и при нуле его отбрасывает. Поэтому поза стойки должна быть
+	// первым кадром своей анимации (или анимация покоя — отдельный клип).
+	constexpr int32 WalkAnimationIndex = 0;
+	constexpr int32 IdleAnimationIndex = 1;
+
+	// Порог «идёт / стоит» по наблюдаемой скорости Unit, см/с, с гистерезисом:
+	// переминающийся в толкучке Unit не должен мигать между позами. Те же
+	// числа, что у поворота тела по ходу в Simulation.
+	constexpr float WalkAnimationStartSpeed = 60.0f;
+	constexpr float WalkAnimationStopSpeed = 30.0f;
 
 	// Current debug unit height. When final representation types are added,
 	// this becomes a per-type value derived from their actual visual bounds.
@@ -95,6 +109,9 @@ void AAlgonaArmyPresentationActor::BeginPlay()
 		Fail(TEXT("ISKM Presentation failed: NewAnimBank has no Sequences"));
 		return;
 	}
+
+	// Без второй последовательности все Unit, как и раньше, всегда идут.
+	bHasIdleAnimation = AnimBank->Sequences.Num() > IdleAnimationIndex;
 
 	ValidateInstancingBuildSettings();
 }
@@ -536,7 +553,7 @@ void AAlgonaArmyPresentationActor::RefreshPresentationWorkingSet(
 					const FPrimitiveInstanceId NewInstanceId =
 						InstancedSkinnedMeshComponent->AddInstance(
 							SnapshotTransform,
-							AnimationIndex,
+							WalkAnimationIndex,
 							false);
 
 					if (!NewInstanceId.IsValid())
@@ -1045,7 +1062,9 @@ bool AAlgonaArmyPresentationActor::RebuildInstances()
 		return true;
 	}
 
-	AnimationIndicesScratch.Init(AnimationIndex, CurrentTransforms.Num());
+	// Все создаются с ходьбой; покой выставляет UploadInstanceGpuData ниже
+	// по наблюдаемой скорости.
+	AnimationIndicesScratch.Init(WalkAnimationIndex, CurrentTransforms.Num());
 	FBox WorkingSetBounds(EForceInit::ForceInit);
 	for (int32 Index = 0; Index < CurrentTransforms.Num(); ++Index)
 	{
@@ -1178,6 +1197,37 @@ bool AAlgonaArmyPresentationActor::UploadInstanceGpuData(int32 Index)
 			TEXT("ISKM Presentation failed: SetCustomData failed at %d"),
 			Index));
 		return false;
+	}
+
+	// Анимация «идёт / стоит» по наблюдаемой скорости. Прошлое состояние
+	// для гистерезиса хранит сам компонент (номер анимации инстанса), поэтому
+	// отдельный массив, который пришлось бы переносить при каждой смене
+	// набора видимых Unit, не нужен. Номер меняется только при переходе.
+	if (bHasIdleAnimation)
+	{
+		int32 CurrentAnimation = WalkAnimationIndex;
+		InstancedSkinnedMeshComponent->GetInstanceAnimationIndex(
+			InstanceIds[Index],
+			CurrentAnimation);
+
+		const float Speed = ObservedLinearSpeedsCmPerSecond.IsValidIndex(Index)
+			? ObservedLinearSpeedsCmPerSecond[Index]
+			: 0.0f;
+
+		const bool bWalking = CurrentAnimation == WalkAnimationIndex
+			? Speed >= WalkAnimationStopSpeed
+			: Speed > WalkAnimationStartSpeed;
+
+		const int32 WantedAnimation = bWalking
+			? WalkAnimationIndex
+			: IdleAnimationIndex;
+
+		if (WantedAnimation != CurrentAnimation)
+		{
+			InstancedSkinnedMeshComponent->SetInstanceAnimationIndex(
+				InstanceIds[Index],
+				WantedAnimation);
+		}
 	}
 
 	return true;

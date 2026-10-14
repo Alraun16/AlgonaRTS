@@ -160,4 +160,7 @@ private:
 	bool bLastSpatialSnapshotsEnabled = true;
 	bool bRendererReady = false;
 	bool bRendererFailed = false;
+
+	// В банке анимаций есть вторая последовательность — покой.
+	bool bHasIdleAnimation = false;
 };

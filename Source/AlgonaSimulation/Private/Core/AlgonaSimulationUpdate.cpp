@@ -113,9 +113,16 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	// Стены: жёсткая страховка — Unit возвращаются на проходимую сторону.
 	// До сводки по Squad, чтобы её границы считались по итоговым позициям.
 	ClampUnitsToWalls(DeltaTime, bParallelMovement);
-	UpdateSquadSummary();
 
 	const double WallsEndSeconds =
+		FPlatformTime::Seconds();
+
+	// Сводка по Squad (теснота и фактические границы) считается в стадию l3,
+	// как до появления стен: так стадия walls показывает только зажим, а l3
+	// остаётся сравнимым с замерами прежних шагов.
+	UpdateSquadSummary();
+
+	const double SummaryEndSeconds =
 		FPlatformTime::Seconds();
 
 	// Обновление Unit Grid для Unit, сменивших ячейку.
@@ -145,11 +152,12 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	Metrics.LastSteerMilliseconds =
 		(SteerEndSeconds - LocalGridEndSeconds) * 1000.0;
 	Metrics.LastSeparationMilliseconds =
-		(SeparationEndSeconds - SteerEndSeconds) * 1000.0;
+		((SeparationEndSeconds - SteerEndSeconds)
+			+ (SummaryEndSeconds - WallsEndSeconds)) * 1000.0;
 	Metrics.LastWallsMilliseconds =
 		(WallsEndSeconds - SeparationEndSeconds) * 1000.0;
 	Metrics.LastUnitGridMilliseconds =
-		(UnitGridEndSeconds - WallsEndSeconds) * 1000.0;
+		(UnitGridEndSeconds - SummaryEndSeconds) * 1000.0;
 	Metrics.bLastParallelMovement = bParallelMovement;
 	Metrics.LastStepMilliseconds =
 		(FPlatformTime::Seconds() - StepStartSeconds) * 1000.0;
