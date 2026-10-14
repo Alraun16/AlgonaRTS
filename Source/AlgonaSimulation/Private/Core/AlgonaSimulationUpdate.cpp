@@ -51,6 +51,14 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 
 	++SimulationTick;
 
+	// Стены запекаются при первой надобности: к этому моменту навигация
+	// мира уже загружена. Пересборка навмеша присылает сигнал и запекает
+	// заново (OnNavigationGenerationFinished).
+	if (!bWallFieldBuilt && AreWallsEnabled() && !Squads.IsEmpty())
+	{
+		RebuildWallField();
+	}
+
 	// Стадия 1: команды. Приказы стресс-сценария замеров подаются в ту же
 	// очередь непосредственно перед её разбором.
 	if (bStressMoveEnabled)
@@ -96,12 +104,18 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 	const double SteerEndSeconds =
 		FPlatformTime::Seconds();
 
-	// L3: контакт — расталкивание реально перекрывшихся Unit, затем сводка
-	// по Squad (теснота и фактические границы) для следующего тика.
+	// L3: контакт — расталкивание реально перекрывшихся Unit.
 	SeparateUnits(DeltaTime, bParallelMovement);
-	UpdateSquadSummary();
 
 	const double SeparationEndSeconds =
+		FPlatformTime::Seconds();
+
+	// Стены: жёсткая страховка — Unit возвращаются на проходимую сторону.
+	// До сводки по Squad, чтобы её границы считались по итоговым позициям.
+	ClampUnitsToWalls(DeltaTime, bParallelMovement);
+	UpdateSquadSummary();
+
+	const double WallsEndSeconds =
 		FPlatformTime::Seconds();
 
 	// Обновление Unit Grid для Unit, сменивших ячейку.
@@ -132,8 +146,10 @@ void UAlgonaSimulationSubsystem::RunSimulationStep(
 		(SteerEndSeconds - LocalGridEndSeconds) * 1000.0;
 	Metrics.LastSeparationMilliseconds =
 		(SeparationEndSeconds - SteerEndSeconds) * 1000.0;
+	Metrics.LastWallsMilliseconds =
+		(WallsEndSeconds - SeparationEndSeconds) * 1000.0;
 	Metrics.LastUnitGridMilliseconds =
-		(UnitGridEndSeconds - SeparationEndSeconds) * 1000.0;
+		(UnitGridEndSeconds - WallsEndSeconds) * 1000.0;
 	Metrics.bLastParallelMovement = bParallelMovement;
 	Metrics.LastStepMilliseconds =
 		(FPlatformTime::Seconds() - StepStartSeconds) * 1000.0;

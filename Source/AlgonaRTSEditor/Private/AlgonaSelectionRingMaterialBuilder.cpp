@@ -19,12 +19,19 @@
 DEFINE_LOG_CATEGORY_STATIC(LogAlgonaSelectionEditor, Log, All);
 
 /*
- * Редакторский генератор материала круга выбора.
+ * Редакторские генераторы материалов отображения выбора.
  *
- * Запускается один раз вручную в редакторе (не в PIE) консольной командой
- * algona.P2.BuildSelectionRingMaterial. Материал рисует на плоскости
- * красное кольцо: Unlit (не зависит от освещения), Masked (пиксели вне
- * кольца отбрасываются), с флагом использования на инстансах.
+ * Запускаются по одному разу вручную в редакторе (не в PIE) консольными
+ * командами algona.P2.BuildSelectionRingMaterial и
+ * algona.P2.BuildSquadCenterBeamMaterial.
+ *
+ * Круг выбора — красное кольцо на плоскости: Unlit (не зависит от
+ * освещения), Masked (пиксели вне кольца отбрасываются).
+ * Луч центра Squad — сплошной белый цилиндр: Unlit и Opaque, поэтому
+ * он одинаково виден и в тени, и на свету.
+ *
+ * Оба материала помечены флагом использования на инстансах: собранная
+ * игра не умеет включать его во время выполнения.
  */
 namespace
 {
@@ -39,38 +46,118 @@ namespace
 				NodeY));
 	}
 
-	void BuildSelectionRingMaterial()
+	// Создаёт пустой материал в своём пакете или возвращает nullptr, если
+	// такой ассет уже есть (перезаписывать молча нельзя) либо идёт PIE.
+	UMaterial* CreateMaterialAsset(
+		const TCHAR* AssetName,
+		FString& OutPackageName,
+		UPackage*& OutPackage)
 	{
 		if (GEditor && GEditor->PlayWorld)
 		{
 			UE_LOG(
 				LogAlgonaSelectionEditor,
 				Error,
-				TEXT("[Selection] Stop PIE before building the ring material."));
-			return;
+				TEXT("[Selection] Stop PIE before building %s."),
+				AssetName);
+			return nullptr;
 		}
 
-		const FString PackageName = FString::Printf(
+		OutPackageName = FString::Printf(
 			TEXT("%s/%s"),
 			AlgonaSelection::RingMaterialFolder,
-			AlgonaSelection::RingMaterialAssetName);
+			AssetName);
 
-		if (FPackageName::DoesPackageExist(PackageName)
-			|| FindPackage(nullptr, *PackageName))
+		if (FPackageName::DoesPackageExist(OutPackageName)
+			|| FindPackage(nullptr, *OutPackageName))
 		{
 			UE_LOG(
 				LogAlgonaSelectionEditor,
 				Error,
 				TEXT("[Selection] Asset already exists: %s. Delete it in the Content Browser (or restart the editor if already deleted) and run the command again."),
-				*PackageName);
-			return;
+				*OutPackageName);
+			return nullptr;
 		}
 
-		UPackage* Package = CreatePackage(*PackageName);
-		UMaterial* Material = NewObject<UMaterial>(
-			Package,
-			FName(AlgonaSelection::RingMaterialAssetName),
+		OutPackage = CreatePackage(*OutPackageName);
+
+		return NewObject<UMaterial>(
+			OutPackage,
+			FName(AssetName),
 			RF_Public | RF_Standalone | RF_Transactional);
+	}
+
+	// Компилирует и сохраняет материал на диск.
+	bool SaveMaterialAsset(
+		UMaterial* Material,
+		UPackage* Package,
+		const FString& PackageName)
+	{
+		// Флаг использования сохраняется в ассете: собранная игра
+		// не умеет включать его во время выполнения.
+		UMaterialEditingLibrary::SetBaseMaterialUsage(
+			Material,
+			MATUSAGE_InstancedStaticMeshes,
+			true);
+
+		Material->PostEditChange();
+
+		const TArray<FString> CompileErrors =
+			UMaterialEditingLibrary::RecompileMaterial(Material);
+		if (!CompileErrors.IsEmpty())
+		{
+			UE_LOG(
+				LogAlgonaSelectionEditor,
+				Error,
+				TEXT("[Selection] %s compile failed: %s"),
+				*PackageName,
+				*FString::Join(CompileErrors, TEXT(" | ")));
+			return false;
+		}
+
+		FAssetRegistryModule::AssetCreated(Material);
+		Package->MarkPackageDirty();
+
+		const FString Filename = FPackageName::LongPackageNameToFilename(
+			PackageName,
+			FPackageName::GetAssetPackageExtension());
+
+		FSavePackageArgs SaveArgs;
+		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+		SaveArgs.SaveFlags = SAVE_NoError;
+
+		if (!UPackage::SavePackage(Package, Material, *Filename, SaveArgs))
+		{
+			UE_LOG(
+				LogAlgonaSelectionEditor,
+				Error,
+				TEXT("[Selection] Cannot save %s"),
+				*Filename);
+			return false;
+		}
+
+		UE_LOG(
+			LogAlgonaSelectionEditor,
+			Display,
+			TEXT("[Selection] Material saved: %s"),
+			*PackageName);
+
+		return true;
+	}
+
+	void BuildSelectionRingMaterial()
+	{
+		FString PackageName;
+		UPackage* Package = nullptr;
+		UMaterial* Material = CreateMaterialAsset(
+			AlgonaSelection::RingMaterialAssetName,
+			PackageName,
+			Package);
+
+		if (!Material)
+		{
+			return;
+		}
 
 		Material->SetShadingModel(MSM_Unlit);
 		Material->BlendMode = BLEND_Masked;
@@ -127,57 +214,45 @@ namespace
 		EditorData->EmissiveColor.Connect(0, Color);
 		EditorData->OpacityMask.Connect(0, RingMask);
 
-		// Флаг использования сохраняется в ассете: собранная игра
-		// не умеет включать его во время выполнения.
-		UMaterialEditingLibrary::SetBaseMaterialUsage(
-			Material,
-			MATUSAGE_InstancedStaticMeshes,
-			true);
+		SaveMaterialAsset(Material, Package, PackageName);
+	}
 
-		Material->PostEditChange();
-
-		const TArray<FString> CompileErrors =
-			UMaterialEditingLibrary::RecompileMaterial(Material);
-		if (!CompileErrors.IsEmpty())
-		{
-			UE_LOG(
-				LogAlgonaSelectionEditor,
-				Error,
-				TEXT("[Selection] Ring material compile failed: %s"),
-				*FString::Join(CompileErrors, TEXT(" | ")));
-			return;
-		}
-
-		FAssetRegistryModule::AssetCreated(Material);
-		Package->MarkPackageDirty();
-
-		const FString Filename = FPackageName::LongPackageNameToFilename(
+	void BuildSquadCenterBeamMaterial()
+	{
+		FString PackageName;
+		UPackage* Package = nullptr;
+		UMaterial* Material = CreateMaterialAsset(
+			AlgonaSelection::BeamMaterialAssetName,
 			PackageName,
-			FPackageName::GetAssetPackageExtension());
+			Package);
 
-		FSavePackageArgs SaveArgs;
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		SaveArgs.SaveFlags = SAVE_NoError;
-
-		if (!UPackage::SavePackage(Package, Material, *Filename, SaveArgs))
+		if (!Material)
 		{
-			UE_LOG(
-				LogAlgonaSelectionEditor,
-				Error,
-				TEXT("[Selection] Cannot save %s"),
-				*Filename);
 			return;
 		}
 
-		UE_LOG(
-			LogAlgonaSelectionEditor,
-			Display,
-			TEXT("[Selection] Ring material saved: %s"),
-			AlgonaSelection::RingMaterialObjectPath);
+		// Сплошной белый цилиндр: ни освещение, ни прозрачность тут не нужны,
+		// луч должен быть одинаково читаем в любом месте карты.
+		Material->SetShadingModel(MSM_Unlit);
+		Material->BlendMode = BLEND_Opaque;
+
+		UMaterialExpressionConstant3Vector* Color =
+			CreateExpression<UMaterialExpressionConstant3Vector>(Material, -400, -200);
+		Color->Constant = FLinearColor::White;
+
+		UMaterialEditorOnlyData* EditorData = Material->GetEditorOnlyData();
+		EditorData->EmissiveColor.Connect(0, Color);
+
+		SaveMaterialAsset(Material, Package, PackageName);
 	}
 
 	FAutoConsoleCommand GAlgonaBuildSelectionRingMaterialCommand(
 		TEXT("algona.P2.BuildSelectionRingMaterial"),
 		TEXT("Editor only (not in PIE): generate and save the selection ring material."),
 		FConsoleCommandDelegate::CreateStatic(&BuildSelectionRingMaterial));
+
+	FAutoConsoleCommand GAlgonaBuildSquadCenterBeamMaterialCommand(
+		TEXT("algona.P2.BuildSquadCenterBeamMaterial"),
+		TEXT("Editor only (not in PIE): generate and save the squad center beam material."),
+		FConsoleCommandDelegate::CreateStatic(&BuildSquadCenterBeamMaterial));
 }

@@ -6,6 +6,7 @@
 #include "Army/AlgonaSquad.h"
 #include "Spatial/AlgonaTorusGrid.h"
 #include "Spatial/AlgonaUnitSpatialGrid.h"
+#include "Spatial/AlgonaWallField.h"
 
 #include "CoreMinimal.h"
 #include "Mass/EntityHandle.h"
@@ -13,6 +14,7 @@
 
 #include "AlgonaSimulationSubsystem.generated.h"
 
+class ANavigationData;
 class UMassEntityConfigAsset;
 class UMassEntitySubsystem;
 class UMassSpawnerSubsystem;
@@ -167,6 +169,22 @@ public:
 		return DebugPathPortals;
 	}
 
+	/**
+	 * Запекает стены из границы проходимой зоны навмеша: один раз при первой
+	 * надобности, заново при пересборке навигации и по команде
+	 * algona.P2.RebuildWalls.
+	 */
+	void RebuildWallField();
+
+	/**
+	 * Запечённые стены (граница проходимой зоны) для отладочной отрисовки.
+	 * Пустое поле — навигации в мире нет или стены выключены.
+	 */
+	const FAlgonaWallField& GetWallField() const
+	{
+		return WallField;
+	}
+
 	/** Squad по SquadId или nullptr. */
 	const FAlgonaSquad* FindSquad(int32 SquadId) const
 	{
@@ -316,6 +334,7 @@ private:
 		double UnitGridMillisecondsSum = 0.0;
 		double LocalGridMillisecondsSum = 0.0;
 		double SeparationMillisecondsSum = 0.0;
+		double WallsMillisecondsSum = 0.0;
 		int64 MovedEntitiesSum = 0;
 	};
 
@@ -354,6 +373,29 @@ private:
 		// 1 — Unit заметно уклоняется и должен смотреть по ходу, а не идти боком.
 		TArray<uint8> AvoidanceFacingFlags;
 
+		// 1 — слот Unit внутри препятствия, и Unit стоит в ближайшем к нему
+		// доступном месте. Такой Unit не считается отстающим: статусы
+		// дистанции (шаг 18) читают этот признак.
+		TArray<uint8> SlotBlockedFlags;
+
+		// Терпение у стены (стоящий Squad). Несколько слотов в стене
+		// выдавливаются в одну и ту же точку у её грани, и без этого Unit
+		// толкались бы за неё вечно. Unit помнит, насколько близко к цели
+		// он подошёл и сколько секунд с тех пор не продвинулся; не
+		// продвинувшийся встаёт там, где стоит, до следующего приказа или
+		// Reform. SettleEpisodes — эпизод стояния Squad, к которому всё
+		// это относится: другой номер значит «начать заново».
+		TArray<uint32> SettleEpisodes;
+		TArray<float> SettleBestDistances;
+		TArray<float> SettleStuckSeconds;
+		TArray<FVector2f> HoldPositions;
+		TArray<uint8> HoldFlags;
+
+		// 1 — Unit сейчас смотрит по ходу движения. Порог с гистерезисом:
+		// без него крошечный остаток намерения в толкучке, меняющий знак
+		// каждый тик, разворачивал Unit влево-вправо.
+		TArray<uint8> MoveFacingFlags;
+
 
 		// L3: скорость расталкивания за этот тик. Добавляется к движению
 		// поверх инерции: толчок действует сразу, а не разгоняется.
@@ -385,6 +427,14 @@ private:
 		float FacingYaw = 0.0f;
 		float UnitAcceleration = 0.0f;
 		bool bLocalAvoidance = false;
+		bool bNearWall = false;
+		bool bStanding = false;
+		uint32 SettleEpisode = 0;
+
+		// Центр Squad: по нему выбирается сторона стены, на которую
+		// выдавливаются слоты, — он у стоящего Squad не движется, поэтому
+		// цель Unit не прыгает, пока сам Unit толкается в толпе.
+		FVector2f Center = FVector2f::ZeroVector;
 		bool bUnitsFaceMovement = false;
 		float UnitMaxSpeed = 0.0f;
 	};
@@ -487,6 +537,38 @@ private:
 	 * запас, который путь держит от препятствий на повороте.
 	 */
 	static double GetSquadPathLookahead(const FAlgonaSquad& Squad);
+
+	// --- Статические препятствия для Unit (AlgonaSimulationWalls.cpp) ---
+
+	UFUNCTION()
+	void OnNavigationGenerationFinished(ANavigationData* NavData);
+
+	/**
+	 * Запас Unit от линии границы проходимой зоны, см.
+	 *
+	 * Карта уже сужена на WallAgentRadiusCm, поэтому обычному Unit запас не
+	 * нужен (0), а крупному нужен ровно на столько, насколько он шире этого
+	 * сужения. Отрицательным сам по себе не бывает: граница навмеша лежит не
+	 * точно, и заходить за неё по расчёту нельзя. В минус его уводит только
+	 * algona.P2.WallMargin вручную, и не глубже клетки навмеша.
+	 */
+	float GetUnitWallMargin(float Radius) const
+	{
+		return FMath::Max(
+			FMath::Max(Radius - WallAgentRadiusCm, 0.0f) + WallExtraMarginCm,
+			-WallCellSizeCm);
+	}
+
+	// Значения CVar algona.P2.Wall*.
+	static bool AreWallsEnabled();
+	static float GetWallExtraMargin();
+
+	/**
+	 * Стадия шага: возвращает Unit, оказавшихся за стеной или ближе запаса
+	 * к ней, на проходимую сторону и гасит их скорость в стену.
+	 * Жёсткая страховка поверх обхода стен в намерении (SteerUnits).
+	 */
+	void ClampUnitsToWalls(float DeltaTime, bool bParallel);
 
 	// Значения CVar algona.P2.Path*.
 	static bool IsSquadPathEnabled();
@@ -607,6 +689,20 @@ private:
 	TArray<FVector2f> SquadBoundsMax;
 	TArray<uint8> SquadNeedsLocalAvoidance;
 	TArray<uint8> SquadIsMoving;
+
+	// Стены: запечённая граница проходимой зоны, фактическое сужение её
+	// карты, размер клетки навмеша и признак «рядом с этим Squad есть
+	// стены» по номеру Squad.
+	FAlgonaWallField WallField;
+	float WallAgentRadiusCm = 0.0f;
+	float WallCellSizeCm = 0.0f;
+
+	// Подстроечный запас algona.P2.WallMargin, считанный на начало стадии:
+	// в параллельных проходах CVar не читается.
+	float WallExtraMarginCm = 0.0f;
+	bool bWallFieldBuilt = false;
+	bool bWallRebuildHookBound = false;
+	TArray<uint8> SquadNearWall;
 
 	// Состояние стресс-сценария: направление следующего прохода по Y
 	// (+1 или -1) для каждого SquadId.

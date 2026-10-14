@@ -211,6 +211,11 @@ void UAlgonaSimulationSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	bStressMoveEnabled = false;
 	StressMoveDirections.Reset();
 
+	// Стены запекаются при первой надобности: навигация к первому шагу уже
+	// загружена, а на BeginPlay она ещё может строиться.
+	WallField.Reset();
+	bWallFieldBuilt = false;
+
 	if (!IsAuthoritativeSimulationWorld())
 	{
 		return;
@@ -261,6 +266,7 @@ void UAlgonaSimulationSubsystem::Deinitialize()
 	UnitEntities.Reset();
 	UnitState = FAlgonaUnitStateArrays();
 	Squads.Reset();
+	WallField.Reset();
 	UnitSpatialGrid.Reset(AlgonaSimulationDefaults::SpatialGridCellSizeCm);
 	PendingCommands.Reset();
 	PathRequestQueue.Reset();
@@ -550,6 +556,7 @@ void UAlgonaSimulationSubsystem::AccumulateMetricsReportStep()
 	Window.PathsMillisecondsSum += Metrics.LastPathMilliseconds;
 	Window.LocalGridMillisecondsSum += Metrics.LastLocalGridMilliseconds;
 	Window.SeparationMillisecondsSum += Metrics.LastSeparationMilliseconds;
+	Window.WallsMillisecondsSum += Metrics.LastWallsMilliseconds;
 	Window.MovedEntitiesSum += Metrics.LastMovedEntities;
 }
 
@@ -610,7 +617,7 @@ void UAlgonaSimulationSubsystem::UpdateMetricsReport(
 	UE_LOG(
 		LogAlgonaSimulation,
 		Display,
-		TEXT("[P2 Metrics] units=%d window=%.2fs steps=%d (%.1f Hz) maxSteps/frame=%d | step avg=%.2f max=%.2f ms | commands=%.2f path=%.2f squads=%.2f steer=%.2f l3grid=%.2f l3=%.2f grid=%.2f ms | fps avg=%.0f worst=%.0f | changed avg=%lld | backlog=%.3fs overloaded+=%llu | parallel=%s workers=%d | stress=%s"),
+		TEXT("[P2 Metrics] units=%d window=%.2fs steps=%d (%.1f Hz) maxSteps/frame=%d | step avg=%.2f max=%.2f ms | commands=%.2f path=%.2f squads=%.2f steer=%.2f l3grid=%.2f l3=%.2f walls=%.2f grid=%.2f ms | fps avg=%.0f worst=%.0f | changed avg=%lld | backlog=%.3fs overloaded+=%llu | parallel=%s workers=%d | stress=%s"),
 		UnitEntities.Num(),
 		WindowSeconds,
 		Window.StepCount,
@@ -624,6 +631,7 @@ void UAlgonaSimulationSubsystem::UpdateMetricsReport(
 		Window.SteerMillisecondsSum * InverseStepCount,
 		Window.LocalGridMillisecondsSum * InverseStepCount,
 		Window.SeparationMillisecondsSum * InverseStepCount,
+		Window.WallsMillisecondsSum * InverseStepCount,
 		Window.UnitGridMillisecondsSum * InverseStepCount,
 		static_cast<double>(Window.FrameCount) / WindowSeconds,
 		Window.MaxFrameMilliseconds > 0.0

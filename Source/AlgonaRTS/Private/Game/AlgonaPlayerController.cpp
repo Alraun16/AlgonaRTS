@@ -3,6 +3,7 @@
 #include "Camera/AlgonaRTSCameraActor.h"
 #include "Core/AlgonaSimulationSubsystem.h"
 #include "Presentation/AlgonaSelectionPresentationActor.h"
+#include "Spatial/AlgonaWallField.h"
 
 #include "Camera/PlayerCameraManager.h"
 #include "DrawDebugHelpers.h"
@@ -47,6 +48,32 @@ namespace
 	// Высота линий пути над землёй и размер отметки точки пути, см.
 	constexpr double DebugPathHeightOffset = 40.0;
 	constexpr float DebugPathPointSize = 30.0f;
+
+	// Луч в центре выбранного Squad: видно, где центр находится программно
+	// и как он ведёт себя на поворотах и у препятствий — Unit вокруг него
+	// отстают и уклоняются, поэтому по строю центр не прочитать.
+	TAutoConsoleVariable<int32> CVarAlgonaP2DebugSquadCenter(
+		TEXT("algona.P2.DebugSquadCenter"),
+		1,
+		TEXT("1 = draw a vertical beam at the simulated center of every selected squad."),
+		ECVF_Cheat);
+
+	// Отладка стен: запечённая граница проходимой зоны вокруг камеры.
+	TAutoConsoleVariable<int32> CVarAlgonaP2DebugWalls(
+		TEXT("algona.P2.DebugWalls"),
+		0,
+		TEXT("1 = draw the baked unit walls around the camera, 2 = also draw their normals."),
+		ECVF_Cheat);
+
+	// Радиус отрисовки стен вокруг камеры и высота линий, см. Радиус
+	// отмеряется от самой камеры, а она в RTS висит высоко и позади, поэтому
+	// он заведомо больше видимого куска земли.
+	constexpr double DebugWallsRadius = 20000.0;
+	constexpr double DebugWallsHeight = 60.0;
+
+	// Нормали рисуются длинными и другим цветом: иначе они теряются среди
+	// самих отрезков границы, которых много и которые лежат рядом.
+	constexpr double DebugWallsNormalLength = 300.0;
 
 	// Мёртвая зона ПКМ, пиксели: пока курсор ближе к точке нажатия,
 	// это клик, и угол курсора вокруг цели ещё неустойчив.
@@ -242,7 +269,9 @@ void AAlgonaPlayerController::PlayerTick(float DeltaTime)
 	UpdateSelectionInput();
 	UpdateOrderInput();
 	UpdateSelectionRings();
+	UpdateSquadCenterBeams();
 	DrawSelectedSquadPaths();
+	DrawWalls();
 }
 
 void AAlgonaPlayerController::UpdateCameraInput(float DeltaTime)
@@ -914,6 +943,103 @@ void AAlgonaPlayerController::DrawSelectedSquadPaths() const
 			DrawDebugPoint(World, Point, DebugPathPointSize, FColor::Yellow, false, -1.0f);
 
 			Previous = Point;
+		}
+	}
+}
+
+void AAlgonaPlayerController::UpdateSquadCenterBeams()
+{
+	if (!SelectionPresentation)
+	{
+		return;
+	}
+
+	const UWorld* World = GetWorld();
+	const UAlgonaSimulationSubsystem* Simulation =
+		World ? World->GetSubsystem<UAlgonaSimulationSubsystem>() : nullptr;
+
+	SquadCenterBeamLocations.Reset();
+
+	if (Simulation && CVarAlgonaP2DebugSquadCenter.GetValueOnGameThread() != 0)
+	{
+		for (const int32 SquadId : SelectedSquadIds)
+		{
+			// Ровно CenterLocation, без сглаживания и поправок: луч должен
+			// показывать состояние Simulation, а не красивую версию его.
+			if (const FAlgonaSquad* Squad = Simulation->FindSquad(SquadId))
+			{
+				SquadCenterBeamLocations.Add(Squad->CenterLocation);
+			}
+		}
+	}
+
+	SelectionPresentation->SetSquadCenterBeams(SquadCenterBeamLocations);
+}
+
+void AAlgonaPlayerController::DrawWalls() const
+{
+	UWorld* World = GetWorld();
+	const UAlgonaSimulationSubsystem* Simulation =
+		World ? World->GetSubsystem<UAlgonaSimulationSubsystem>() : nullptr;
+
+	const int32 DebugMode = CVarAlgonaP2DebugWalls.GetValueOnGameThread();
+
+	if (!Simulation || DebugMode == 0)
+	{
+		return;
+	}
+
+	const FAlgonaWallField& WallField = Simulation->GetWallField();
+
+	if (WallField.IsEmpty() || !PlayerCameraManager)
+	{
+		return;
+	}
+
+	// Стен на карте много (вся граница навмеша), поэтому рисуются только
+	// те, что рядом с камерой.
+	const FVector ViewLocation = PlayerCameraManager->GetCameraLocation();
+	const FVector2f ViewPoint(
+		static_cast<float>(ViewLocation.X),
+		static_cast<float>(ViewLocation.Y));
+	const float RadiusSquared = static_cast<float>(
+		DebugWallsRadius * DebugWallsRadius);
+
+	for (const FAlgonaWallSegment& Wall : WallField.GetSegments())
+	{
+		const FVector2f Middle = (Wall.Start + Wall.End) * 0.5f;
+
+		if ((Middle - ViewPoint).SizeSquared() > RadiusSquared)
+		{
+			continue;
+		}
+
+		const FVector Start(
+			Wall.Start.X,
+			Wall.Start.Y,
+			Wall.MinZ + DebugWallsHeight);
+		const FVector End(
+			Wall.End.X,
+			Wall.End.Y,
+			Wall.MaxZ + DebugWallsHeight);
+
+		DrawDebugLine(World, Start, End, FColor::Orange, false, -1.0f, 0, 3.0f);
+
+		// Нормаль: по ней видно, какую сторону симуляция считает проходимой.
+		if (DebugMode >= 2)
+		{
+			const FVector MiddlePoint = (Start + End) * 0.5;
+			const FVector Normal(Wall.Normal.X, Wall.Normal.Y, 0.0f);
+
+			DrawDebugLine(
+				World,
+				MiddlePoint,
+				MiddlePoint + Normal * DebugWallsNormalLength,
+				FColor::Cyan,
+				false,
+				-1.0f,
+				0,
+				4.0f);
 		}
 	}
 }

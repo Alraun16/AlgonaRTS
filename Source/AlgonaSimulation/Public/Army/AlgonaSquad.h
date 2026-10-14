@@ -192,6 +192,14 @@ struct ALGONASIMULATION_API FAlgonaSquad
 	int32 LocalAvoidanceHoldTicks = 0;
 	uint32 LocalAvoidanceFormationRevision = TNumericLimits<uint32>::Max();
 
+	// Эпизод стояния: номер растёт, когда Squad останавливается или
+	// перестраивается стоя. По нему Unit узнают, что их «терпение» у стены
+	// (сколько они не продвигаются к цели и где встали) относится к прошлой
+	// остановке и должно начаться заново, — без прохода по всем Unit.
+	uint32 SettleEpisode = 0;
+	bool bSettleStanding = false;
+	uint32 SettleFormationRevision = TNumericLimits<uint32>::Max();
+
 	// Теснота Squad (0..1): насколько его Unit тормозят и обходят соседей.
 	// Считается после движения Unit, используется L1 в следующем тике.
 	float Congestion = 0.0f;

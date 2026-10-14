@@ -18,6 +18,15 @@ AAlgonaSelectionPresentationActor::AAlgonaSelectionPresentationActor()
 	RingComponent->SetCastShadow(false);
 	RingComponent->SetMobility(EComponentMobility::Movable);
 	RootComponent = RingComponent;
+
+	// Луч в центре выбранного Squad: сплошной меш, тоже без коллизий.
+	BeamComponent = CreateDefaultSubobject<UInstancedStaticMeshComponent>(
+		TEXT("SquadCenterBeams"));
+	BeamComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	BeamComponent->SetCanEverAffectNavigation(false);
+	BeamComponent->SetCastShadow(false);
+	BeamComponent->SetMobility(EComponentMobility::Movable);
+	BeamComponent->SetupAttachment(RingComponent);
 }
 
 void AAlgonaSelectionPresentationActor::BeginPlay()
@@ -45,6 +54,43 @@ void AAlgonaSelectionPresentationActor::BeginPlay()
 
 	RingComponent->SetStaticMesh(RingMesh);
 	RingComponent->SetMaterial(0, RingMaterial);
+
+	UStaticMesh* BeamMesh =
+		LoadObject<UStaticMesh>(nullptr, AlgonaSelection::BeamMeshObjectPath);
+	UMaterialInterface* BeamMaterial =
+		LoadObject<UMaterialInterface>(nullptr, AlgonaSelection::BeamMaterialObjectPath);
+
+	if (!BeamMesh || !BeamMaterial)
+	{
+		UE_LOG(
+			LogAlgonaSelection,
+			Error,
+			TEXT("[Selection] Cannot load beam mesh or material (%s). Run algona.P2.BuildSquadCenterBeamMaterial in the editor (not in PIE)."),
+			AlgonaSelection::BeamMaterialObjectPath);
+		return;
+	}
+
+	// Габариты меша читаются из него самого: у стандартного цилиндра точка
+	// привязки в центре, но полагаться на это незачем — масштаб и подъём
+	// считаются так, чтобы низ луча оказался ровно в заданной точке.
+	const FBox MeshBox = BeamMesh->GetBoundingBox();
+	const FVector MeshSize = MeshBox.GetSize();
+
+	BeamScale = FVector(
+		MeshSize.X > UE_DOUBLE_SMALL_NUMBER
+			? AlgonaSelection::BeamRadiusCm * 2.0 / MeshSize.X
+			: 1.0,
+		MeshSize.Y > UE_DOUBLE_SMALL_NUMBER
+			? AlgonaSelection::BeamRadiusCm * 2.0 / MeshSize.Y
+			: 1.0,
+		MeshSize.Z > UE_DOUBLE_SMALL_NUMBER
+			? AlgonaSelection::BeamHeightCm / MeshSize.Z
+			: 1.0);
+
+	BeamPivotOffsetCm = -MeshBox.Min.Z * BeamScale.Z;
+
+	BeamComponent->SetStaticMesh(BeamMesh);
+	BeamComponent->SetMaterial(0, BeamMaterial);
 }
 
 void AAlgonaSelectionPresentationActor::SetRingTransforms(
@@ -69,6 +115,42 @@ void AAlgonaSelectionPresentationActor::SetRingTransforms(
 		RingComponent->BatchUpdateInstancesTransforms(
 			0,
 			RingTransforms,
+			false,
+			true,
+			true);
+	}
+}
+
+void AAlgonaSelectionPresentationActor::SetSquadCenterBeams(
+	const TArray<FVector>& BeamBaseLocations)
+{
+	BeamTransforms.Reset(BeamBaseLocations.Num());
+
+	for (const FVector& BaseLocation : BeamBaseLocations)
+	{
+		BeamTransforms.Emplace(
+			FQuat::Identity,
+			BaseLocation + FVector(0.0, 0.0, BeamPivotOffsetCm),
+			BeamScale);
+	}
+
+	const int32 CurrentCount = BeamComponent->GetInstanceCount();
+
+	if (CurrentCount != BeamTransforms.Num())
+	{
+		BeamComponent->ClearInstances();
+		if (!BeamTransforms.IsEmpty())
+		{
+			BeamComponent->AddInstances(BeamTransforms, false, false, false);
+		}
+		return;
+	}
+
+	if (!BeamTransforms.IsEmpty())
+	{
+		BeamComponent->BatchUpdateInstancesTransforms(
+			0,
+			BeamTransforms,
 			false,
 			true,
 			true);

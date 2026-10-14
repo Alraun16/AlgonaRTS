@@ -41,6 +41,9 @@ struct ALGONASIMULATION_API FAlgonaSimulationMetrics
 	double LastLocalGridMilliseconds = 0.0;
 	double LastSeparationMilliseconds = 0.0;
 
+	// Стены: возврат Unit на проходимую сторону и сводка по Squad.
+	double LastWallsMilliseconds = 0.0;
+
 	// Конвейер движения последнего шага выполнялся на рабочих потоках.
 	bool bLastParallelMovement = false;
 	double BacklogSeconds = 0.0;

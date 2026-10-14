@@ -69,6 +69,12 @@ private:
 	// Отладка: путь центра выбранных Squad линиями (algona.P2.DebugPath).
 	void DrawSelectedSquadPaths() const;
 
+	// Вертикальный луч в центре выбранных Squad (algona.P2.DebugSquadCenter).
+	void UpdateSquadCenterBeams();
+
+	// Отладка: запечённые стены Unit вокруг камеры (algona.P2.DebugWalls).
+	void DrawWalls() const;
+
 	UPROPERTY(Transient)
 	TObjectPtr<AAlgonaRTSCameraActor> CameraActor = nullptr;
 
@@ -107,6 +113,7 @@ private:
 	double WidthInitialScreenDistance = 0.0;
 	int32 WidthInitialRowLength = 0;
 
-	// Переиспользуемый буфер transform кругов, чтобы не выделять память каждый кадр.
+	// Переиспользуемые буферы, чтобы не выделять память каждый кадр.
 	TArray<FTransform> RingTransforms;
+	TArray<FVector> SquadCenterBeamLocations;
 };

@@ -201,6 +201,38 @@ namespace
 	// свободной с небольшим зазором, а не «в притык».
 	constexpr float AvoidanceGapMargin = 2.0f;
 
+	// Насколько далеко вперёд Unit смотрит на стены, см. Совпадает с
+	// клеткой сетки стен, поэтому хватает одного поиска 3×3.
+	constexpr float WallLookaheadCm = AlgonaWallCellSizeCm;
+
+	// Запас к границам Squad при проверке «рядом есть стены», см: Unit на
+	// краю строя должен увидеть стену заранее, плюс он успеет сдвинуться
+	// за тик между проверками.
+	constexpr float WallBroadphaseMarginCm = 2.0f * AlgonaWallCellSizeCm;
+
+	// Проходов зажима за тик: второй нужен в углу, где после возврата от
+	// одной стены ближайшей становится соседняя.
+	constexpr int32 WallClampPasses = 2;
+
+	// Терпение у стены: Unit стоящего Squad, который столько секунд не
+	// подошёл к цели хотя бы на SettleProgressCm, встаёт там, где стоит.
+	// Идущий к цели Unit продвигается на сотни сантиметров в секунду, так что
+	// сдаётся только тот, кто действительно упёрся.
+	constexpr float SettlePatienceSeconds = 1.5f;
+	constexpr float SettleProgressCm = 20.0f;
+
+	// Поворот по ходу движения — только при заметной скорости намерения,
+	// с гистерезисом, см/с. Те же числа, что у поворота при уклонении.
+	constexpr float MoveFacingSpeed = 60.0f;
+	constexpr float MoveFacingReleaseSpeed = 30.0f;
+
+	// За сколько секунд Unit должен успеть погасить ход в стену, с.
+	// Скорость сближения со стеной ограничена «остатком до запаса, делённым
+	// на это время»: далеко от стены ограничения нет вовсе, вплотную оно
+	// гасит ход полностью. Простое обнуление составляющей в стену делало из
+	// порога стену в воздухе — Unit останавливался за метр до камня.
+	constexpr float WallApproachTimeSeconds = 0.1f;
+
 	// Сторона обхода меняется, только если щель с другой стороны заметно
 	// ближе: иначе Unit виляет влево-вправо, пока протискивается.
 	constexpr float AvoidanceSideSwitchRatio = 0.7f;
@@ -308,6 +340,13 @@ void UAlgonaSimulationSubsystem::ResizeUnitState(int32 TotalUnitCount)
 	ResizeArray(State.NextVelocities, TotalUnitCount, FVector2f::ZeroVector);
 	ResizeArray(State.Crowding, TotalUnitCount, 0.0f);
 	ResizeArray(State.AvoidanceFacingFlags, TotalUnitCount, static_cast<uint8>(0));
+	ResizeArray(State.SlotBlockedFlags, TotalUnitCount, static_cast<uint8>(0));
+	ResizeArray(State.SettleEpisodes, TotalUnitCount, TNumericLimits<uint32>::Max());
+	ResizeArray(State.SettleBestDistances, TotalUnitCount, TNumericLimits<float>::Max());
+	ResizeArray(State.SettleStuckSeconds, TotalUnitCount, 0.0f);
+	ResizeArray(State.HoldPositions, TotalUnitCount, FVector2f::ZeroVector);
+	ResizeArray(State.HoldFlags, TotalUnitCount, static_cast<uint8>(0));
+	ResizeArray(State.MoveFacingFlags, TotalUnitCount, static_cast<uint8>(0));
 	ResizeArray(State.SeparationVelocities, TotalUnitCount, FVector2f::ZeroVector);
 	ResizeArray(State.ContactDepths, TotalUnitCount, 0.0f);
 	ResizeArray(State.DodgeVelocities, TotalUnitCount, FVector2f::ZeroVector);
@@ -351,6 +390,20 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 		Frame.bLocalAvoidance = SquadNeedsLocalAvoidance.IsValidIndex(SquadIndex)
 			&& SquadNeedsLocalAvoidance[SquadIndex] != 0;
 
+		// Стены считаются отдельно от соседей: одинокий Squad у стены в L3
+		// не попадает, но сквозь стену проходить всё равно не должен.
+		Frame.bNearWall = SquadNearWall.IsValidIndex(SquadIndex)
+			&& SquadNearWall[SquadIndex] != 0;
+
+		// Squad доехал и стоит: только тогда слот, оказавшийся в стене,
+		// подменяется ближайшим доступным местом (правило ГД о финише
+		// рядом с препятствием).
+		Frame.bStanding = !Squad.bHasMoveTarget && Squad.YawRate == 0.0f;
+		Frame.SettleEpisode = Squad.SettleEpisode;
+		Frame.Center = FVector2f(
+			static_cast<float>(Squad.CenterLocation.X),
+			static_cast<float>(Squad.CenterLocation.Y));
+
 		// В среднем режиме Unit смотрят по направлению движения, даже стоя
 		// в своих слотах: «лунный бег» боком на десяток метров выглядит странно.
 		Frame.bUnitsFaceMovement =
@@ -379,8 +432,6 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 		* DeltaTime;
 	const float FaceMovementMinDistanceSquared =
 		FMath::Square(AlgonaUnitSteering::FaceMovementMinDistance);
-	const float IdleSpeedSquared =
-		FMath::Square(AlgonaUnitSteering::IdleSpeed);
 	const float StandingSpeedSquared = FMath::Square(StandingSpeed);
 
 	const float SlotDeadZone = CVarAlgonaP2SlotDeadZone.GetValueOnGameThread();
@@ -394,6 +445,11 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 		CVarAlgonaP2Avoidance.GetValueOnGameThread() != 0
 		&& CVarAlgonaP2LocalAvoidanceGrid.GetValueOnGameThread() != 0
 		&& LocalAvoidanceGrid.GetEntryCount() > 0;
+
+	// Стены участвуют независимо от отбора соседей: Squad у стены может
+	// быть на карте один, но проходить сквозь камень всё равно не должен.
+	const bool bWalls = AreWallsEnabled() && !WallField.IsEmpty();
+	WallExtraMarginCm = GetWallExtraMargin();
 	const float AvoidanceHorizon =
 		FMath::Max(CVarAlgonaP2AvoidanceHorizon.GetValueOnGameThread(), UE_KINDA_SMALL_NUMBER);
 	const float PersonalSpace = CVarAlgonaP2AvoidancePersonalSpace.GetValueOnGameThread();
@@ -417,6 +473,13 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 	FVector2f* NextVelocityData = State.NextVelocities.GetData();
 	float* CrowdingData = State.Crowding.GetData();
 	uint8* AvoidanceFacingData = State.AvoidanceFacingFlags.GetData();
+	uint8* SlotBlockedData = State.SlotBlockedFlags.GetData();
+	uint32* SettleEpisodeData = State.SettleEpisodes.GetData();
+	float* SettleBestData = State.SettleBestDistances.GetData();
+	float* SettleStuckData = State.SettleStuckSeconds.GetData();
+	FVector2f* HoldPositionData = State.HoldPositions.GetData();
+	uint8* HoldData = State.HoldFlags.GetData();
+	uint8* MoveFacingData = State.MoveFacingFlags.GetData();
 	float* FacingYawData = State.FacingYaws.GetData();
 	uint8* ChangedData = State.ChangedFlags.GetData();
 	uint8* CellChangedData = State.CellChangedFlags.GetData();
@@ -456,13 +519,109 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 			AvoidanceFacingData[UnitIndex] = 0;
 			DodgeData[UnitIndex] = FVector2f::ZeroVector;
 			BrakeData[UnitIndex] = 0.0f;
+			SlotBlockedData[UnitIndex] = 0;
 			return;
 		}
 
 		const FAlgonaSquadMovementFrame& Frame = FrameData[SquadId];
 		FVector2f LocalOffset;
-		const FVector SlotPosition = GetSlotPosition(SquadId, SlotIndex, LocalOffset);
+		FVector SlotPosition = GetSlotPosition(SquadId, SlotIndex, LocalOffset);
 		const FVector& Position = PositionData[UnitIndex];
+
+		const bool bWallAvoidance = bWalls && Frame.bNearWall;
+		SlotBlockedData[UnitIndex] = 0;
+
+		// Правило «слот внутри препятствия»: Squad доехал, а слот оказался
+		// в стене. Цель Unit — ближайшее доступное место у стены со своей
+		// стороны: слот выдавливается наружу по нормали. Пока Squad идёт,
+		// слот через стены проносит постоянно, и правило не нужно — там
+		// работает обход стен и зажим.
+		if (bWallAvoidance && Frame.bStanding)
+		{
+			const float SlotMargin = GetUnitWallMargin(RadiusData[UnitIndex]);
+			const FVector2f Position2D(
+				static_cast<float>(Position.X),
+				static_cast<float>(Position.Y));
+
+			const FVector2f SlotTarget(
+				static_cast<float>(SlotPosition.X),
+				static_cast<float>(SlotPosition.Y));
+
+			// Ближайший к слоту элемент границы — но только среди стен, перед
+			// которыми стоит центр Squad: у толстой стены две стороны, и слот
+			// выдавливается на сторону отряда, а не на дальнюю, куда идти в
+			// обход. По центру, а не по самому Unit: центр у стоящего Squad
+			// неподвижен, а Unit в толпе толкается, и цель прыгала бы вместе
+			// с ним.
+			FAlgonaWallNearest Nearest;
+
+			WallField.ForEachSegmentNear(
+				SlotPosition,
+				AlgonaWallQueryRadiusCm,
+				[&](const FAlgonaWallSegment& Wall)
+			{
+				if (GetAlgonaWallSignedOffset(Wall, Frame.Center) < -1.0f)
+				{
+					return;
+				}
+
+				AccumulateAlgonaNearestWall(Wall, SlotTarget, Nearest);
+			});
+
+			const FVector2f Correction =
+				GetAlgonaNearestWallCorrection(Nearest, SlotTarget, SlotMargin);
+
+			if (!Correction.IsNearlyZero())
+			{
+				SlotPosition.X = SlotTarget.X + Correction.X;
+				SlotPosition.Y = SlotTarget.Y + Correction.Y;
+				SlotBlockedData[UnitIndex] = 1;
+			}
+
+			// Терпение. Новая остановка или Reform — всё сначала.
+			if (SettleEpisodeData[UnitIndex] != Frame.SettleEpisode)
+			{
+				SettleEpisodeData[UnitIndex] = Frame.SettleEpisode;
+				SettleBestData[UnitIndex] = TNumericLimits<float>::Max();
+				SettleStuckData[UnitIndex] = 0.0f;
+				HoldData[UnitIndex] = 0;
+			}
+
+			if (HoldData[UnitIndex] == 0)
+			{
+				const float DistanceToTarget = FVector2f(
+					static_cast<float>(SlotPosition.X - Position.X),
+					static_cast<float>(SlotPosition.Y - Position.Y)).Size();
+
+				if (DistanceToTarget <= SlotDeadZone
+					|| DistanceToTarget < SettleBestData[UnitIndex] - SettleProgressCm)
+				{
+					// Дошёл или заметно приблизился: терпение заново.
+					SettleBestData[UnitIndex] = DistanceToTarget;
+					SettleStuckData[UnitIndex] = 0.0f;
+				}
+				else
+				{
+					SettleStuckData[UnitIndex] += DeltaTime;
+
+					if (SettleStuckData[UnitIndex] >= SettlePatienceSeconds)
+					{
+						// Не продвинулся: встаёт там, где стоит. Это и есть
+						// «ближайшая доступная позиция» ГД, когда к самой
+						// точке у стены не пробиться.
+						HoldData[UnitIndex] = 1;
+						HoldPositionData[UnitIndex] = Position2D;
+					}
+				}
+			}
+
+			if (HoldData[UnitIndex] != 0)
+			{
+				SlotPosition.X = HoldPositionData[UnitIndex].X;
+				SlotPosition.Y = HoldPositionData[UnitIndex].Y;
+				SlotBlockedData[UnitIndex] = 1;
+			}
+		}
 
 		// Скорость слота = скорость центра + вклад поворота строя.
 		// При повороте на YawRate вектор «вперёд» движется вдоль «вправо»,
@@ -507,7 +666,9 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 		// столкнётся в ближайшие AvoidanceHorizon секунд. Результат идёт
 		// в намерение — через инерцию, поэтому получается дуга, а не отскок.
 		// Уклоняются обе стороны: идущий и стоящий, на которого надвигаются.
-		if (bAvoidance && Frame.bLocalAvoidance)
+		const bool bNeighbourAvoidance = bAvoidance && Frame.bLocalAvoidance;
+
+		if (bNeighbourAvoidance || bWallAvoidance)
 		{
 			// Решение об обходе пересчитывается через тик: горизонт реакции
 			// 0.8 с, и задержка в 25 мс на нём незаметна, а работы вдвое
@@ -546,6 +707,106 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 
 			const float AvoidanceQueryRadius = QueryRings * LocalAvoidanceCellSizeCm;
 
+			// Стены — на той же поперечной оси, что соседи, но их
+			// подвижность нулевая: уступать стене нечем, поэтому Unit
+			// берёт весь обход на себя. Отрезки одной стены идут подряд и
+			// сливаются в один интервал, иначе они вытеснили бы соседей.
+			if (bWallAvoidance && bMoving)
+			{
+				const float WallMargin = GetUnitWallMargin(RadiusData[UnitIndex]);
+				const float WallInflate = WallMargin + PersonalSpace;
+				const float WallForwardRange =
+					FMath::Min(LookaheadDistance, WallLookaheadCm);
+				const float IntentSpeed = IntentVelocity.Size();
+				const FVector2f Position2D(
+					static_cast<float>(Position.X),
+					static_cast<float>(Position.Y));
+
+				WallField.ForEachSegmentNear(
+					Position,
+					AlgonaWallQueryRadiusCm,
+					[&](const FAlgonaWallSegment& Wall)
+				{
+					// Стена, оставшаяся позади, Unit не касается.
+					if (GetAlgonaWallSignedOffset(Wall, Position2D)
+						< -AlgonaWallMaxDepthCm)
+					{
+						return;
+					}
+
+					float Low = 0.0f;
+					float High = 0.0f;
+					float ForwardDistance = 0.0f;
+
+					if (!GetAlgonaWallLateralSpan(
+						Wall,
+						Position2D,
+						MoveDirection,
+						RightDirection,
+						WallForwardRange,
+						WallInflate,
+						Low,
+						High,
+						ForwardDistance))
+					{
+						return;
+					}
+
+					const float Time = IntentSpeed > UE_SMALL_NUMBER
+						? ForwardDistance / IntentSpeed
+						: 0.0f;
+
+					// Слияние с уже отложенной стеной: отрезки одной стены
+					// дают соседние интервалы, а проход между двумя стенами
+					// остаётся разрывом, потому что они не пересекаются.
+					FAvoidanceThreat* Merged = nullptr;
+
+					for (int32 Index = 0; Index < ThreatCount; ++Index)
+					{
+						FAvoidanceThreat& Threat = Threats[Index];
+
+						if (Threat.OtherMobility == 0.0f
+							&& Low <= Threat.High
+							&& High >= Threat.Low)
+						{
+							Merged = &Threat;
+							break;
+						}
+					}
+
+					if (Merged == nullptr)
+					{
+						if (ThreatCount >= MaxAvoidanceThreats)
+						{
+							return;
+						}
+
+						Merged = &Threats[ThreatCount++];
+						Merged->Low = Low;
+						Merged->High = High;
+						Merged->Time = Time;
+						Merged->OtherMobility = 0.0f;
+					}
+					else
+					{
+						Merged->Low = FMath::Min(Merged->Low, Low);
+						Merged->High = FMath::Max(Merged->High, High);
+						Merged->Time = FMath::Min(Merged->Time, Time);
+					}
+
+					// Стена поперёк хода: тормозить тем сильнее, чем ближе.
+					if (Merged->Low < 0.0f
+						&& Merged->High > 0.0f
+						&& Merged->Time <= AvoidanceHorizon)
+					{
+						const float Urgency = 1.0f - Merged->Time / AvoidanceHorizon;
+						Brake = FMath::Max(Brake, Urgency * PassBrake);
+					}
+				});
+			}
+
+			if (bNeighbourAvoidance)
+			{
 			LocalAvoidanceGrid.ForEachCandidate(Position, QueryRings, [&](int32 OtherIndex)
 			{
 				if (OtherIndex == UnitIndex)
@@ -665,6 +926,7 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 					Brake = FMath::Max(Brake, Urgency * PassBrake);
 				}
 			});
+			}
 
 			// Выбор щели: ближайший сдвиг вбок, при котором я никого не задену.
 			// Стороны получаются разными сами собой — кто чуть левее встречного,
@@ -823,6 +1085,72 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 			DodgeData[UnitIndex] = FVector2f::ZeroVector;
 		}
 
+		// Ход в стену ограничен остатком до запаса: Unit подходит к камню
+		// вплотную, замедляясь у самой стены, а дальше его намерение
+		// остаётся только вдоль стены — это и есть скольжение. Поворот тела
+		// считается по намерению, поэтому Unit заодно смотрит вдоль стены.
+		if (bWallAvoidance && !Desired.IsNearlyZero())
+		{
+			const float WallMargin = GetUnitWallMargin(RadiusData[UnitIndex]);
+			const FVector2f Position2D(
+				static_cast<float>(Position.X),
+				static_cast<float>(Position.Y));
+
+			WallField.ForEachSegmentNear(
+				Position,
+				AlgonaWallQueryRadiusCm,
+				[&](const FAlgonaWallSegment& Wall)
+			{
+				const float Into = FVector2f::DotProduct(Desired, Wall.Normal);
+
+				if (Into >= 0.0f)
+				{
+					return;
+				}
+
+				const float SignedOffset = GetAlgonaWallSignedOffset(Wall, Position2D);
+
+				if (SignedOffset < -AlgonaWallMaxDepthCm)
+				{
+					return;
+				}
+
+				// Сколько Unit вправе сближаться со стеной: остаток до
+				// запаса за время гашения. Вплотную — нуль.
+				const float MaxApproachSpeed =
+					FMath::Max(SignedOffset - WallMargin, 0.0f)
+						/ WallApproachTimeSeconds;
+
+				if (-Into <= MaxApproachSpeed)
+				{
+					return;
+				}
+
+				// За краем отрезка Unit свободно обходит угол: там стеной
+				// занимается соседний отрезок, а не этот. Сантиметр допуска —
+				// на стыки отрезков границы.
+				if (!IsAlgonaWallFacingPoint(
+					Wall,
+					Position2D,
+					FMath::Max(WallMargin, 1.0f)))
+				{
+					return;
+				}
+
+				// Убирается только излишек хода в стену, а не вся
+				// составляющая: иначе порог сам становится стеной.
+				Desired += Wall.Normal * (-MaxApproachSpeed - Into);
+			});
+		}
+
+		// Unit, чей слот в препятствии, не считается заторможенным: по ГД он
+		// не должен ни замедлять Squad, ни заставлять его ждать. Статусы
+		// дистанции (шаг 18) читают тот же признак.
+		if (SlotBlockedData[UnitIndex] != 0)
+		{
+			Crowding = 0.0f;
+		}
+
 		DesiredData[UnitIndex] = Desired;
 		CrowdingData[UnitIndex] = Crowding;
 		AvoidanceFacingData[UnitIndex] = bAvoidanceFacing ? 1 : 0;
@@ -880,11 +1208,20 @@ void UAlgonaSimulationSubsystem::SteerUnits(
 			static_cast<float>(SlotPosition.X - Position.X),
 			static_cast<float>(SlotPosition.Y - Position.Y)).SizeSquared();
 
+		// По ходу движения — только при заметной скорости намерения и с
+		// гистерезисом: в толкучке остаток намерения мал и меняет знак каждый
+		// тик, и с порогом в сантиметр в секунду Unit крутился на месте.
+		const float FaceSpeed = MoveFacingData[UnitIndex] != 0
+			? MoveFacingReleaseSpeed
+			: MoveFacingSpeed;
+
 		const bool bFaceMovement =
 			(Frame.bUnitsFaceMovement
 				|| DistanceToSlotSquared > FaceMovementMinDistanceSquared
 				|| AvoidanceFacingData[UnitIndex] != 0)
-			&& DesiredData[UnitIndex].SizeSquared() > IdleSpeedSquared;
+			&& DesiredData[UnitIndex].SizeSquared() > FMath::Square(FaceSpeed);
+
+		MoveFacingData[UnitIndex] = bFaceMovement ? 1 : 0;
 
 		// Поворот по намерению, а не по фактической скорости: толчки и мелкие
 		// поправки не должны крутить модель.
@@ -929,11 +1266,43 @@ void UAlgonaSimulationSubsystem::SelectLocalAvoidanceUnits()
 
 	const int32 SquadCount = Squads.Num();
 	SquadNeedsLocalAvoidance.SetNumUninitialized(SquadCount, EAllowShrinking::No);
+	SquadNearWall.SetNumUninitialized(SquadCount, EAllowShrinking::No);
 	SquadIsMoving.SetNumUninitialized(SquadCount, EAllowShrinking::No);
 	SquadBoundsMin.SetNumUninitialized(SquadCount, EAllowShrinking::No);
 	SquadBoundsMax.SetNumUninitialized(SquadCount, EAllowShrinking::No);
 	SquadBroadphaseIndices.Reset(SquadCount);
 	LocalAvoidanceUnitIndices.Reset(UnitState.Positions.Num());
+
+	// Стены: грубая проверка границ Squad по решётке занятости. Отбор
+	// соседей к ней не относится — Squad у стены может быть на карте один.
+	const bool bWalls = AreWallsEnabled() && !WallField.IsEmpty();
+
+	for (int32 SquadIndex = 0; SquadIndex < SquadCount; ++SquadIndex)
+	{
+		FAlgonaSquad& Squad = Squads[SquadIndex];
+
+		// Новый эпизод стояния: Squad только что остановился или
+		// перестроился стоя. Терпение его Unit у стены начинается заново.
+		const bool bStanding = !Squad.bHasMoveTarget && Squad.YawRate == 0.0f;
+
+		if (bStanding
+			&& (!Squad.bSettleStanding
+				|| Squad.SettleFormationRevision != Squad.FormationRevision))
+		{
+			++Squad.SettleEpisode;
+		}
+
+		Squad.bSettleStanding = bStanding;
+		Squad.SettleFormationRevision = Squad.FormationRevision;
+
+		const FVector2f WallMargin(WallBroadphaseMarginCm, WallBroadphaseMarginCm);
+		SquadNearWall[SquadIndex] = bWalls
+			&& !Squad.ActiveUnitIds.IsEmpty()
+			&& WallField.HasSegmentsNearBounds(
+				Squad.UnitBoundsMin - WallMargin,
+				Squad.UnitBoundsMax + WallMargin)
+			? 1 : 0;
+	}
 
 	if (CVarAlgonaP2LocalAvoidanceGrid.GetValueOnGameThread() == 0)
 	{
@@ -963,14 +1332,22 @@ void UAlgonaSimulationSubsystem::SelectLocalAvoidanceUnits()
 			--Squad.LocalAvoidanceHoldTicks;
 		}
 
-		SquadNeedsLocalAvoidance[SquadIndex] = Squad.LocalAvoidanceHoldTicks > 0 ? 1 : 0;
+		// Рядом со стеной L3 нужен даже стоящему одинокому Squad: его Unit
+		// двигает зажим по стенам, и без расталкивания они в этой толкучке
+		// проходят друг сквозь друга.
+		SquadNeedsLocalAvoidance[SquadIndex] =
+			(Squad.LocalAvoidanceHoldTicks > 0
+				|| (SquadNearWall.IsValidIndex(SquadIndex)
+					&& SquadNearWall[SquadIndex] != 0))
+			? 1 : 0;
 
 		// Стоящий Squad рядом со стоящим соседом никому не мешает: чтобы
 		// пара попала в L3, двигаться должен хотя бы один из них.
 		SquadIsMoving[SquadIndex] =
 			(Squad.CenterSpeed > StandingSpeed
 				|| Squad.YawRate != 0.0f
-				|| Squad.LocalAvoidanceHoldTicks > 0)
+				|| Squad.LocalAvoidanceHoldTicks > 0
+				|| SquadNeedsLocalAvoidance[SquadIndex] != 0)
 			? 1 : 0;
 
 		const FVector2f Margin(SquadBroadphaseMarginCm, SquadBroadphaseMarginCm);
@@ -1240,6 +1617,127 @@ void UAlgonaSimulationSubsystem::SeparateUnits(
 
 	RunForUnits(UnitCount, bParallel, TEXT("AlgonaSimulation_ComputeSeparation"), ComputePush);
 	RunForUnits(UnitCount, bParallel, TEXT("AlgonaSimulation_ApplySeparation"), ApplyPush);
+}
+
+void UAlgonaSimulationSubsystem::ClampUnitsToWalls(
+	float DeltaTime,
+	bool bParallel)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(AlgonaSimulation_ClampUnitsToWalls);
+
+	if (DeltaTime <= 0.0f || !AreWallsEnabled() || WallField.IsEmpty())
+	{
+		return;
+	}
+
+	// Рядом со стенами никого: проход по сотне тысяч Unit впустую заметен.
+	bool bAnySquadNearWall = false;
+
+	for (const uint8 NearWall : SquadNearWall)
+	{
+		bAnySquadNearWall |= NearWall != 0;
+	}
+
+	if (!bAnySquadNearWall)
+	{
+		return;
+	}
+
+	WallExtraMarginCm = GetWallExtraMargin();
+
+	FAlgonaUnitStateArrays& State = UnitState;
+	const int32 UnitCount = State.Positions.Num();
+	const int32 SquadCount = SquadMovementFrames.Num();
+
+	const FAlgonaSquadMovementFrame* FrameData = SquadMovementFrames.GetData();
+	const int32* SquadIdData = State.SquadIds.GetData();
+	const float* RadiusData = State.Radii.GetData();
+	FVector* PositionData = State.Positions.GetData();
+	FVector2f* VelocityData = State.Velocities.GetData();
+	uint8* ChangedData = State.ChangedFlags.GetData();
+	uint8* CellChangedData = State.CellChangedFlags.GetData();
+
+	// Стена не уступает и не пружинит: Unit, оказавшийся за границей или
+	// ближе запаса к ней, возвращается ровно на место, а его скорость
+	// теряет составляющую в стену — это и есть скольжение вдоль стены.
+	// Куда возвращать, решает только ближайший к Unit элемент границы.
+	auto ClampUnit = [&](int32 UnitIndex)
+	{
+		const int32 SquadId = SquadIdData[UnitIndex];
+
+		if (SquadId < 0 || SquadId >= SquadCount || !FrameData[SquadId].bNearWall)
+		{
+			return;
+		}
+
+		FVector& Position = PositionData[UnitIndex];
+		const float Margin = GetUnitWallMargin(RadiusData[UnitIndex]);
+
+		const FVector2f OriginalPoint(
+			static_cast<float>(Position.X),
+			static_cast<float>(Position.Y));
+
+		FVector2f Point = OriginalPoint;
+		FVector2f Velocity = VelocityData[UnitIndex];
+		bool bCorrected = false;
+
+		// Решает ближайший элемент границы. Второй проход — для угла: после
+		// возврата от одной стены ближайшей может стать соседняя.
+		for (int32 Pass = 0; Pass < WallClampPasses; ++Pass)
+		{
+			FAlgonaWallNearest Nearest;
+
+			WallField.ForEachSegmentNear(
+				Position,
+				AlgonaWallQueryRadiusCm,
+				[&](const FAlgonaWallSegment& Wall)
+			{
+				AccumulateAlgonaNearestWall(Wall, Point, Nearest);
+			});
+
+			const FVector2f Correction =
+				GetAlgonaNearestWallCorrection(Nearest, Point, Margin);
+
+			if (Correction.IsNearlyZero())
+			{
+				break;
+			}
+
+			Point += Correction;
+			bCorrected = true;
+
+			// Скорость в стену гасится — по направлению самой поправки:
+			// оно и есть «наружу» для этого места границы.
+			const FVector2f Outward = Correction.GetSafeNormal();
+			const float Into = FVector2f::DotProduct(Velocity, Outward);
+
+			if (Into < 0.0f)
+			{
+				Velocity -= Outward * Into;
+			}
+		}
+
+		if (!bCorrected)
+		{
+			return;
+		}
+
+		// К позиции прибавляется только поправка: сама позиция хранится
+		// с двойной точностью, и округлять её до float незачем.
+		Position.X += static_cast<double>(Point.X - OriginalPoint.X);
+		Position.Y += static_cast<double>(Point.Y - OriginalPoint.Y);
+		VelocityData[UnitIndex] = Velocity;
+		ChangedData[UnitIndex] = 1;
+
+		if (UnitSpatialGrid.NeedsCellUpdate(
+				static_cast<uint32>(UnitIndex + 1),
+				Position))
+		{
+			CellChangedData[UnitIndex] = 1;
+		}
+	};
+
+	RunForUnits(UnitCount, bParallel, TEXT("AlgonaSimulation_ClampWalls"), ClampUnit);
 }
 
 void UAlgonaSimulationSubsystem::UpdateSquadSummary()

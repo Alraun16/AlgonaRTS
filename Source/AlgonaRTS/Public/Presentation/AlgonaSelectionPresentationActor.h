@@ -24,6 +24,21 @@ namespace AlgonaSelection
 
 	// Внутренний радиус кольца относительно внешнего (толщина кольца).
 	inline constexpr float RingInnerRatio = 0.85f;
+
+	// Материал луча центра Squad: создаётся заранее редакторской командой
+	// algona.P2.BuildSquadCenterBeamMaterial.
+	inline constexpr const TCHAR* BeamMaterialAssetName = TEXT("M_SquadCenterBeam");
+	inline constexpr const TCHAR* BeamMaterialObjectPath =
+		TEXT("/Game/Algona/Presentation/Selection/M_SquadCenterBeam.M_SquadCenterBeam");
+
+	// Стандартный цилиндр движка: по нему считается масштаб луча, но его
+	// размеры и точка привязки читаются из самого меша, а не берутся на веру.
+	inline constexpr const TCHAR* BeamMeshObjectPath =
+		TEXT("/Engine/BasicShapes/Cylinder.Cylinder");
+
+	// Размеры луча центра Squad: высота от земли и радиус, см.
+	inline constexpr double BeamHeightCm = 1000.0;
+	inline constexpr double BeamRadiusCm = 6.0;
 }
 
 /**
@@ -44,10 +59,27 @@ public:
 	/** Заменяет набор кругов. Transform: позиция центра и масштаб по радиусу. */
 	void SetRingTransforms(const TArray<FTransform>& RingTransforms);
 
+	/**
+	 * Заменяет набор лучей центров Squad: по одному на точку, вертикально
+	 * вверх от неё. Точка — ровно CenterLocation из Simulation.
+	 */
+	void SetSquadCenterBeams(const TArray<FVector>& BeamBaseLocations);
+
 	/** Масштаб плоскости, при котором внешний радиус кольца равен Radius. */
 	static FVector GetRingScale(double Radius);
 
 private:
 	UPROPERTY(Transient)
 	TObjectPtr<UInstancedStaticMeshComponent> RingComponent = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UInstancedStaticMeshComponent> BeamComponent = nullptr;
+
+	// Масштаб и подъём меша луча, посчитанные по его собственным габаритам:
+	// точка привязки стандартного цилиндра в коде не предполагается.
+	FVector BeamScale = FVector::OneVector;
+	double BeamPivotOffsetCm = 0.0;
+
+	// Переиспользуемый буфер transform лучей.
+	TArray<FTransform> BeamTransforms;
 };
